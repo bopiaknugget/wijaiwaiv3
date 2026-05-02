@@ -1,0 +1,8 @@
+name = "ui_worker"
+description = "Implements 3-panel Streamlit UI updates."
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+Preserve 3-panel layout. Left=Reference Vault, Middle=Workbench, Right=Chat Assistant. Hide Notes/Web. Make minimal label and routing changes.
+"""

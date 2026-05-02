@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lint dependencies
+        run: pip install flake8
+
+      - name: Run flake8
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,pvenv,rag_pipeline.py
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    env:
+      OPENTHAI_API_KEY: ${{ secrets.OPENTHAI_API_KEY }}
+      PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+      PINECONE_INDEX_NAME: wijaiwai
+      PINECONE_HOST: ${{ secrets.PINECONE_HOST }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REDIRECT_URI: http://localhost:8501/oauth2callback
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-cov
+
+      - name: Run tests
+        run: pytest tests/ -v --ignore=tests/locustfile.py --ignore=tests/app_for_locust.py --ignore=tests/run_benchmark.py -k "not integration" --tb=short
+
+  import-check:
+    name: Import Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check core module imports
+        run: |
+          python -c "import database"
+          python -c "import document_loader"
+          python -c "import query_router"
+          python -c "import web_scraper"
+        env:
+          OPENTHAI_API_KEY: dummy
+          PINECONE_API_KEY: dummy
+          PINECONE_INDEX_NAME: wijaiwai
+          PINECONE_HOST: https://dummy.pinecone.io
+          GOOGLE_CLIENT_ID: dummy
+          GOOGLE_CLIENT_SECRET: dummy
+          GOOGLE_REDIRECT_URI: http://localhost:8501/oauth2callback

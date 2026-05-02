@@ -1,0 +1,122 @@
+[
+  {
+    "test_id": 1,
+    "name": "Research Mode (AI+Education)",
+    "template": "Research Mode",
+    "input_tokens": 677,
+    "output_tokens": 2621,
+    "latency_ms": 17860.5,
+    "cost_thb": 0.046172000000000005,
+    "quality_passed": true,
+    "quality_notes": "OK",
+    "error": ""
+  },
+  {
+    "test_id": 2,
+    "name": "Q&A (RAG basics)",
+    "template": "Q&A Answer",
+    "input_tokens": 553,
+    "output_tokens": 917,
+    "latency_ms": 6159.6,
+    "cost_thb": 0.02058,
+    "quality_passed": true,
+    "quality_notes": "OK",
+    "error": ""
+  },
+  {
+    "test_id": 3,
+    "name": "Rephrase+Q&A (RAG drawbacks)",
+    "template": "Rephrase + Q&A",
+    "input_tokens": 769,
+    "output_tokens": 1264,
+    "latency_ms": 8593.3,
+    "cost_thb": 0.028462,
+    "quality_passed": true,
+    "quality_notes": "OK",
+    "error": ""
+  },
+  {
+    "test_id": 4,
+    "name": "Section Gen (Ch.2 Lit Review)",
+    "template": "Section Generation",
+    "input_tokens": 674,
+    "output_tokens": 1550,
+    "latency_ms": 10235.4,
+    "cost_thb": 0.031135999999999997,
+    "quality_passed": false,
+    "quality_notes": "Too short: 122 words (need >=200)",
+    "error": ""
+  },
+  {
+    "test_id": 5,
+    "name": "Section Gen (Ch.3 w/ existing)",
+    "template": "Section Generation",
+    "input_tokens": 763,
+    "output_tokens": 2378,
+    "latency_ms": 15770.3,
+    "cost_thb": 0.043974000000000006,
+    "quality_passed": false,
+    "quality_notes": "Too short: 149 words (need >=200)",
+    "error": ""
+  },
+  {
+    "test_id": 6,
+    "name": "Selection Edit (casual→formal)",
+    "template": "Selection Edit",
+    "input_tokens": 268,
+    "output_tokens": 490,
+    "latency_ms": 3332.9,
+    "cost_thb": 0.010612,
+    "quality_passed": true,
+    "quality_notes": "OK",
+    "error": ""
+  },
+  {
+    "test_id": 7,
+    "name": "Insertion (AI examples)",
+    "template": "Insertion",
+    "input_tokens": 302,
+    "output_tokens": 647,
+    "latency_ms": 4396.8,
+    "cost_thb": 0.013286000000000001,
+    "quality_passed": true,
+    "quality_notes": "OK",
+    "error": ""
+  },
+  {
+    "test_id": 8,
+    "name": "Advisor Review (Ch.1)",
+    "template": "Advisor Review",
+    "input_tokens": 1567,
+    "output_tokens": 1412,
+    "latency_ms": 9617.9,
+    "cost_thb": 0.04170600000000001,
+    "quality_passed": true,
+    "quality_notes": "OK",
+    "error": ""
+  },
+  {
+    "test_id": 9,
+    "name": "Web Summary (Thai article)",
+    "template": "Web Summarization",
+    "input_tokens": 490,
+    "output_tokens": 862,
+    "latency_ms": 5853.0,
+    "cost_thb": 0.018928,
+    "quality_passed": false,
+    "quality_notes": "Summary is longer than input",
+    "error": ""
+  },
+  {
+    "test_id": 10,
+    "name": "Web Title (Thai article)",
+    "template": "Web Title",
+    "input_tokens": 550,
+    "output_tokens": 128,
+    "latency_ms": 967.2,
+    "cost_thb": 0.009492,
+    "quality_passed": true,
+    "quality_notes": "OK",
+    "error": ""
+  }
+]

@@ -1,0 +1,63 @@
+BEGIN:VCALENDAR
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+VERSION:2.0
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+BEGIN:VTIMEZONE
+TZID:Asia/Bangkok
+X-LIC-LOCATION:Asia/Bangkok
+BEGIN:STANDARD
+TZOFFSETFROM:+0700
+TZOFFSETTO:+0700
+TZNAME:GMT+7
+DTSTART:19700101T000000
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+DTSTART;TZID=Asia/Bangkok:20260410T170000
+DTEND;TZID=Asia/Bangkok:20260410T180000
+DTSTAMP:20260407T043212Z
+ORGANIZER;CN=Thirawut Namuangluk:mailto:thirawut@zimpligital.com
+UID:5nllh94632lupuhjh0h24t4hhn@google.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE
+ ;CN=Thirawut Namuangluk;X-NUM-GUESTS=0:mailto:thirawut@zimpligital.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=
+ TRUE;CN=Pongsatorn Sukdee;X-NUM-GUESTS=0:mailto:pongsatorn@zimpligital.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=
+ TRUE;CN=Theerawat Subkerd;X-NUM-GUESTS=0:mailto:theerawat@zimpligital.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=
+ TRUE;CN=tanawatl.cs@gmail.com;X-NUM-GUESTS=0:mailto:tanawatl.cs@gmail.com
+ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=
+ TRUE;CN=Thanyapong Surinta;X-NUM-GUESTS=0:mailto:thanyapong@zimpligital.com
+X-GOOGLE-CONFERENCE:https://meet.google.com/rfj-grdc-ipp
+X-MICROSOFT-CDO-OWNERAPPTID:238577886
+CLASS:PRIVATE
+CREATED:20260407T043155Z
+DESCRIPTION:Dear K. Tanawat\,<br><br><br>I would like to confirm the online
+  interview with Zimpligital as per below details.<br><br>Position:  Senior 
+ Full-Stack Engineer (AI/LLM Systems) <br><br>Interviewer:<br>K. Pongsatorn 
+ Sukdee\, Head of Product <br>K. Thanyapong Surinta\, Product Owner <br><br>
+ Date: Friday\, 10 April 2026<br>Time: 17.00 - 18.00 hrs.<br>Venue: <a href=
+ "https://meet.google.com/rfj-grdc-ipp">https://meet.google.com/rfj-grdc-ipp
+ </a><br><br>If you have any questions or need assistance\, please feel free
+  to contact me.<br><br>Thank you &amp\; Regards\,<br><br>Best Regards\,<br>
+ Thirawut Namuangluk<br>Human Resources Team<br>Tel. (+66)0 64 274 0555\n\n-
+ ::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:
+ ~:~::~:~::-\nJoin with Google Meet: https://meet.google.com/rfj-grdc-ipp\nO
+ r dial: (TH) +66 2 844 9331 PIN: 5678882845268#\nMore phone numbers: https:
+ //tel.meet/rfj-grdc-ipp?pin=5678882845268&hs=7\n\nLearn more about Meet at:
+  https://support.google.com/a/users/answer/9282720\n\nPlease do not edit th
+ is section.\n-::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:
+ ~:~:~:~:~:~:~:~:~::~:~::-
+LAST-MODIFIED:20260407T043206Z
+LOCATION:https://meet.google.com/rfj-grdc-ipp
+SEQUENCE:0
+STATUS:CONFIRMED
+SUMMARY:Interview with K. Tanawat Limungkura - Senior Full-Stack Engineer (
+ AI/LLM Systems) 
+TRANSP:TRANSPARENT
+ATTACH;FILENAME=Tanawat_Resume Senior Full-Stack Engineer (AI  LLM Systems)
+  Resume.pdf;FMTTYPE=application/pdf:https://drive.google.com/open?id=1atCcu
+ tia_YWJq2dmgTCpZ_MxnLcNfJyO
+END:VEVENT
+END:VCALENDAR

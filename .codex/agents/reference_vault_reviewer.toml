@@ -1,0 +1,8 @@
+name = "reference_vault_reviewer"
+description = "Reviews Reference Vault behavior, citation trust, and Notes/Web removal."
+model_reasoning_effort = "medium"
+sandbox_mode = "read-only"
+
+developer_instructions = """
+Focus on Reference Vault only. Check that Notes/Web are not active, citations come only from Vault, SQLite is source of truth, and final citations use [author_name, paper_name]. Do not edit files.
+"""

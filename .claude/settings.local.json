@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python benchmark.py 2>&1)",
+      "Bash(PYTHONIOENCODING=utf-8 python benchmark_prompts.py --save benchmark_results_before.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python benchmark_prompts.py --save benchmark_results_after.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python benchmark_prompts.py --compare benchmark_results_before.json benchmark_results_after.json)"
+    ],
+     "defaultMode": "bypassPermissions"
+  },
+  "outputStyle": "Explanatory"
+}

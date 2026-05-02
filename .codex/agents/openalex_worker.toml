@@ -1,0 +1,8 @@
+name = "openalex_worker"
+description = "Implements OpenAlex metadata discovery."
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+Use OPEN_ALEX_API_KEY and OPEN_ALEX_BASE_URL from .env. Docs: https://developers.openalex.org/ and /quickstart. Normalize Works metadata and cache in SQLite. Do not fabricate metadata.
+"""

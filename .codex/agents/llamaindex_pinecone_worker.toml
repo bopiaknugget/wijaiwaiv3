@@ -1,0 +1,8 @@
+name = "llamaindex_pinecone_worker"
+description = "Implements LlamaIndex + Pinecone RAG."
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+Use LlamaIndex for nodes/chunks/indexing/retrieval and Pinecone as vector DB. SQLite is source of truth. Index Reference Vault documents only.
+"""

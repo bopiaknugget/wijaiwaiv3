@@ -1,0 +1,8 @@
+name = "sqlite_data_worker"
+description = "Implements minimal SQLite schema/data-layer changes."
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+Keep SQLite. Do not migrate to PostgreSQL. Preserve database.py functions where possible. Add Reference Vault, OpenAlex cache, citation log tables. Do not delete legacy data.
+"""

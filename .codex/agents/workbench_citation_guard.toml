@@ -1,0 +1,8 @@
+name = "workbench_citation_guard"
+description = "Implements safe Workbench citation selection."
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+OpenThaiGPT may select citation IDs only. Backend renders [author_name, paper_name] from SQLite Vault metadata. Reject unknown IDs. Do not cite Notes/Web or unimported OpenAlex results.
+"""
