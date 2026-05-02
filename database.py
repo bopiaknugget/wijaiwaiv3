@@ -8,12 +8,40 @@ User isolation: documents, notes, and web_pages are all scoped to user_id.
 Migration: ALTER TABLE adds user_id columns if they don't exist on startup.
 """
 
+import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 
 DB_PATH = Path(__file__).parent / "Database" / "research_notes.db"
+
+
+def _utc_now() -> str:
+    """Return an ISO timestamp for new v3 records."""
+    return datetime.utcnow().isoformat()
+
+
+def _new_id() -> str:
+    """Return a string ID for v3 SQLite tables."""
+    return uuid.uuid4().hex
+
+
+def _json_text(value) -> str | None:
+    """Store JSON-compatible objects as TEXT while preserving string callers."""
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _row_to_dict(cursor, row) -> dict | None:
+    """Convert a sqlite row tuple to a dict using cursor metadata."""
+    if row is None:
+        return None
+    columns = [column[0] for column in cursor.description]
+    return dict(zip(columns, row))
 
 
 @contextmanager
@@ -115,6 +143,154 @@ def initialize_database():
             )
         ''')
 
+        # v3 projects table. Legacy tables remain untouched.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS projects (
+                project_id TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL,
+                name       TEXT,
+                is_default INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+
+        # v3 Reference Vault document metadata.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reference_vault_documents (
+                document_id              TEXT PRIMARY KEY,
+                user_id                  TEXT NOT NULL,
+                project_id               TEXT NOT NULL,
+                paper_name               TEXT,
+                author_display           TEXT,
+                authors_json             TEXT,
+                doi                      TEXT,
+                openalex_id              TEXT,
+                publication_year         INTEGER,
+                filename                 TEXT,
+                file_type                TEXT,
+                storage_path             TEXT,
+                docling_markdown_path    TEXT,
+                docling_status           TEXT,
+                source_type              TEXT NOT NULL DEFAULT 'reference_document',
+                status                   TEXT NOT NULL DEFAULT 'active',
+                metadata_json            TEXT,
+                extraction_metadata_json TEXT,
+                created_at               TEXT,
+                updated_at               TEXT
+            )
+        ''')
+
+        # v3 Reference Vault chunks. Pinecone stores vectors only.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reference_vault_chunks (
+                chunk_id           TEXT PRIMARY KEY,
+                document_id        TEXT NOT NULL,
+                user_id            TEXT NOT NULL,
+                project_id         TEXT NOT NULL,
+                parent_chunk_id    TEXT,
+                chunk_index        INTEGER NOT NULL,
+                markdown_content   TEXT,
+                content            TEXT,
+                content_hash       TEXT,
+                page_number        INTEGER,
+                section_title      TEXT,
+                pinecone_vector_id TEXT,
+                embedding_model    TEXT,
+                source_type        TEXT DEFAULT 'reference_document',
+                metadata_json      TEXT,
+                created_at         TEXT
+            )
+        ''')
+
+        # OpenAlex cache is metadata-only; no OpenAlex API logic lives here.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS openalex_search_cache (
+                cache_id      TEXT PRIMARY KEY,
+                user_id       TEXT,
+                query         TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at    TEXT
+            )
+        ''')
+
+        # Citation candidate/log tables support later verified citation flow.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS citation_candidates (
+                candidate_id     TEXT PRIMARY KEY,
+                user_id          TEXT NOT NULL,
+                project_id       TEXT NOT NULL,
+                document_id      TEXT NOT NULL,
+                chunk_id         TEXT,
+                author_display   TEXT,
+                paper_name       TEXT,
+                evidence_excerpt TEXT,
+                metadata_json    TEXT,
+                created_at       TEXT
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS citation_logs (
+                citation_log_id      TEXT PRIMARY KEY,
+                user_id              TEXT NOT NULL,
+                project_id           TEXT NOT NULL,
+                workbench_document_id TEXT,
+                document_id          TEXT,
+                chunk_id             TEXT,
+                citation_text        TEXT,
+                citation_format      TEXT DEFAULT '[author_name, paper_name]',
+                metadata_json        TEXT,
+                created_at           TEXT
+            )
+        ''')
+
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id)')
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_projects_user_default '
+            'ON projects(user_id, is_default)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_rv_documents_user_project '
+            'ON reference_vault_documents(user_id, project_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_rv_documents_user_project_status '
+            'ON reference_vault_documents(user_id, project_id, status)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_rv_documents_doi '
+            'ON reference_vault_documents(doi)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_rv_documents_openalex_id '
+            'ON reference_vault_documents(openalex_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_rv_chunks_document_id '
+            'ON reference_vault_chunks(document_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_rv_chunks_user_project '
+            'ON reference_vault_chunks(user_id, project_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_rv_chunks_pinecone_vector_id '
+            'ON reference_vault_chunks(pinecone_vector_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_openalex_cache_user_query '
+            'ON openalex_search_cache(user_id, query)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_citation_candidates_user_project '
+            'ON citation_candidates(user_id, project_id)'
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_citation_logs_user_project '
+            'ON citation_logs(user_id, project_id)'
+        )
+
         conn.commit()
 
         # ── Migrations: add user_id columns if not present ─────────────────
@@ -130,6 +306,470 @@ def _add_column_if_missing(cursor, table: str, column: str, col_type: str):
     existing = {row[1] for row in cursor.fetchall()}
     if column not in existing:
         cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
+# ── v3 Projects ─────────────────────────────────────────────────────────────
+
+def create_default_project(user_id: str) -> str:
+    """Create or return the default project for a user."""
+    existing_project_id = get_default_project_id(user_id)
+    if existing_project_id:
+        return existing_project_id
+
+    now = _utc_now()
+    project_id = _new_id()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO projects (project_id, user_id, name, is_default, created_at, updated_at) '
+            'VALUES (?, ?, ?, 1, ?, ?)',
+            (project_id, user_id, 'Default Project', now, now)
+        )
+        conn.commit()
+    return project_id
+
+
+def get_default_project_id(user_id: str) -> str | None:
+    """Return the default project ID for a user, if it exists."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT project_id FROM projects WHERE user_id = ? AND is_default = 1 '
+            'ORDER BY created_at ASC LIMIT 1',
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+
+# ── v3 Reference Vault Documents ────────────────────────────────────────────
+
+def save_reference_vault_document(
+    document_id: str = None,
+    user_id: str = None,
+    project_id: str = None,
+    paper_name: str = None,
+    author_display: str = None,
+    authors_json=None,
+    doi: str = None,
+    openalex_id: str = None,
+    publication_year: int = None,
+    filename: str = None,
+    file_type: str = None,
+    storage_path: str = None,
+    docling_markdown_path: str = None,
+    docling_status: str = None,
+    source_type: str = 'reference_document',
+    status: str = 'active',
+    metadata_json=None,
+    extraction_metadata_json=None,
+) -> str:
+    """Insert or replace a Reference Vault document and return its string ID."""
+    if not user_id:
+        raise ValueError("user_id is required")
+    if not project_id:
+        project_id = create_default_project(user_id)
+
+    now = _utc_now()
+    document_id = document_id or _new_id()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT created_at FROM reference_vault_documents WHERE document_id = ?',
+            (document_id,)
+        )
+        row = cursor.fetchone()
+        created_at = row[0] if row else now
+        cursor.execute(
+            '''
+            INSERT OR REPLACE INTO reference_vault_documents (
+                document_id, user_id, project_id, paper_name, author_display,
+                authors_json, doi, openalex_id, publication_year, filename,
+                file_type, storage_path, docling_markdown_path, docling_status,
+                source_type, status, metadata_json, extraction_metadata_json,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                document_id, user_id, project_id, paper_name, author_display,
+                _json_text(authors_json), doi, openalex_id, publication_year,
+                filename, file_type, storage_path, docling_markdown_path,
+                docling_status, source_type, status, _json_text(metadata_json),
+                _json_text(extraction_metadata_json), created_at, now,
+            )
+        )
+        conn.commit()
+    return document_id
+
+
+def get_reference_vault_document(
+    document_id: str,
+    user_id: str = None,
+    project_id: str = None,
+) -> dict | None:
+    """Retrieve a Reference Vault document by ID with optional user/project scope."""
+    query = 'SELECT * FROM reference_vault_documents WHERE document_id = ?'
+    params = [document_id]
+    if user_id is not None:
+        query += ' AND user_id = ?'
+        params.append(user_id)
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return _row_to_dict(cursor, cursor.fetchone())
+
+
+def list_reference_vault_documents(
+    user_id: str,
+    project_id: str = None,
+    status: str = None,
+) -> list:
+    """List Reference Vault documents for a user with optional filters."""
+    query = 'SELECT * FROM reference_vault_documents WHERE user_id = ?'
+    params = [user_id]
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
+    if status is not None:
+        query += ' AND status = ?'
+        params.append(status)
+    query += ' ORDER BY created_at DESC'
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
+
+
+def update_reference_vault_document_status(
+    document_id: str,
+    status: str,
+    metadata_json=None,
+) -> bool:
+    """Update Reference Vault document status and optional metadata."""
+    now = _utc_now()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if metadata_json is None:
+            cursor.execute(
+                'UPDATE reference_vault_documents SET status = ?, updated_at = ? '
+                'WHERE document_id = ?',
+                (status, now, document_id)
+            )
+        else:
+            cursor.execute(
+                'UPDATE reference_vault_documents '
+                'SET status = ?, metadata_json = ?, updated_at = ? WHERE document_id = ?',
+                (status, _json_text(metadata_json), now, document_id)
+            )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_reference_vault_document(document_id: str, user_id: str = None) -> bool:
+    """Archive a Reference Vault document without deleting the SQLite record."""
+    query = (
+        'UPDATE reference_vault_documents SET status = ?, updated_at = ? '
+        'WHERE document_id = ?'
+    )
+    params = ['archived', _utc_now(), document_id]
+    if user_id is not None:
+        query += ' AND user_id = ?'
+        params.append(user_id)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+# ── v3 Reference Vault Chunks ───────────────────────────────────────────────
+
+def save_reference_vault_chunk(
+    chunk_id: str = None,
+    document_id: str = None,
+    user_id: str = None,
+    project_id: str = None,
+    parent_chunk_id: str = None,
+    chunk_index: int = None,
+    markdown_content: str = None,
+    content: str = None,
+    content_hash: str = None,
+    page_number: int = None,
+    section_title: str = None,
+    pinecone_vector_id: str = None,
+    embedding_model: str = None,
+    source_type: str = 'reference_document',
+    metadata_json=None,
+) -> str:
+    """Insert or replace a Reference Vault chunk and return its string ID."""
+    if not document_id:
+        raise ValueError("document_id is required")
+    if not user_id:
+        raise ValueError("user_id is required")
+    if not project_id:
+        project_id = create_default_project(user_id)
+    if chunk_index is None:
+        raise ValueError("chunk_index is required")
+
+    chunk_id = chunk_id or _new_id()
+    now = _utc_now()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT OR REPLACE INTO reference_vault_chunks (
+                chunk_id, document_id, user_id, project_id, parent_chunk_id,
+                chunk_index, markdown_content, content, content_hash,
+                page_number, section_title, pinecone_vector_id,
+                embedding_model, source_type, metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                chunk_id, document_id, user_id, project_id, parent_chunk_id,
+                chunk_index, markdown_content, content, content_hash,
+                page_number, section_title, pinecone_vector_id, embedding_model,
+                source_type, _json_text(metadata_json), now,
+            )
+        )
+        conn.commit()
+    return chunk_id
+
+
+def save_reference_vault_chunks_batch(records: list):
+    """Save multiple Reference Vault chunks in a single transaction."""
+    if not records:
+        return
+
+    now = _utc_now()
+    prepared = []
+    for record in records:
+        user_id = record.get('user_id')
+        if not user_id:
+            raise ValueError("user_id is required for every chunk")
+        project_id = record.get('project_id') or create_default_project(user_id)
+        chunk_index = record.get('chunk_index')
+        if chunk_index is None:
+            raise ValueError("chunk_index is required for every chunk")
+        prepared.append((
+            record.get('chunk_id') or _new_id(),
+            record.get('document_id'),
+            user_id,
+            project_id,
+            record.get('parent_chunk_id'),
+            chunk_index,
+            record.get('markdown_content'),
+            record.get('content'),
+            record.get('content_hash'),
+            record.get('page_number'),
+            record.get('section_title'),
+            record.get('pinecone_vector_id'),
+            record.get('embedding_model'),
+            record.get('source_type', 'reference_document'),
+            _json_text(record.get('metadata_json')),
+            record.get('created_at') or now,
+        ))
+    if any(row[1] is None for row in prepared):
+        raise ValueError("document_id is required for every chunk")
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.executemany(
+            '''
+            INSERT OR REPLACE INTO reference_vault_chunks (
+                chunk_id, document_id, user_id, project_id, parent_chunk_id,
+                chunk_index, markdown_content, content, content_hash,
+                page_number, section_title, pinecone_vector_id,
+                embedding_model, source_type, metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            prepared
+        )
+        conn.commit()
+
+
+def get_reference_vault_chunk(chunk_id: str) -> dict | None:
+    """Retrieve a Reference Vault chunk by ID."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT * FROM reference_vault_chunks WHERE chunk_id = ?',
+            (chunk_id,)
+        )
+        return _row_to_dict(cursor, cursor.fetchone())
+
+
+def get_reference_vault_chunks_by_document(document_id: str) -> list:
+    """Retrieve Reference Vault chunks for a document ordered by chunk index."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT * FROM reference_vault_chunks WHERE document_id = ? '
+            'ORDER BY chunk_index ASC',
+            (document_id,)
+        )
+        return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
+
+
+def get_reference_vault_chunks_by_vector_ids(
+    vector_ids: list,
+    user_id: str,
+    project_id: str = None,
+) -> list:
+    """Retrieve Reference Vault chunks by Pinecone vector IDs with user scope."""
+    if not vector_ids:
+        return []
+    placeholders = ','.join('?' for _ in vector_ids)
+    query = (
+        f'SELECT * FROM reference_vault_chunks WHERE pinecone_vector_id IN ({placeholders}) '
+        'AND user_id = ?'
+    )
+    params = list(vector_ids) + [user_id]
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
+
+
+def update_reference_vault_chunk_vector_id(
+    chunk_id: str,
+    pinecone_vector_id: str,
+) -> bool:
+    """Persist the Pinecone vector ID for a Reference Vault chunk."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE reference_vault_chunks SET pinecone_vector_id = ? WHERE chunk_id = ?',
+            (pinecone_vector_id, chunk_id)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+# ── v3 OpenAlex Cache and Citation Logging ──────────────────────────────────
+
+def cache_openalex_search(query: str, response_json, user_id: str = None) -> str:
+    """Cache an OpenAlex search response as SQLite TEXT."""
+    cache_id = _new_id()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO openalex_search_cache '
+            '(cache_id, user_id, query, response_json, created_at) VALUES (?, ?, ?, ?, ?)',
+            (cache_id, user_id, query, _json_text(response_json), _utc_now())
+        )
+        conn.commit()
+    return cache_id
+
+
+def get_openalex_search_cache(query: str, user_id: str = None) -> dict | None:
+    """Return the newest cached OpenAlex response for a query."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if user_id is None:
+            cursor.execute(
+                'SELECT * FROM openalex_search_cache WHERE query = ? AND user_id IS NULL '
+                'ORDER BY created_at DESC LIMIT 1',
+                (query,)
+            )
+        else:
+            cursor.execute(
+                'SELECT * FROM openalex_search_cache WHERE query = ? AND user_id = ? '
+                'ORDER BY created_at DESC LIMIT 1',
+                (query, user_id)
+            )
+        return _row_to_dict(cursor, cursor.fetchone())
+
+
+def save_citation_candidate(
+    candidate_id: str = None,
+    user_id: str = None,
+    project_id: str = None,
+    document_id: str = None,
+    chunk_id: str = None,
+    author_display: str = None,
+    paper_name: str = None,
+    evidence_excerpt: str = None,
+    metadata_json=None,
+) -> str:
+    """Save a verified citation candidate for later Workbench citation phases."""
+    if not user_id:
+        raise ValueError("user_id is required")
+    if not project_id:
+        project_id = create_default_project(user_id)
+    if not document_id:
+        raise ValueError("document_id is required")
+
+    candidate_id = candidate_id or _new_id()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT OR REPLACE INTO citation_candidates (
+                candidate_id, user_id, project_id, document_id, chunk_id,
+                author_display, paper_name, evidence_excerpt, metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                candidate_id, user_id, project_id, document_id, chunk_id,
+                author_display, paper_name, evidence_excerpt,
+                _json_text(metadata_json), _utc_now(),
+            )
+        )
+        conn.commit()
+    return candidate_id
+
+
+def save_citation_log(
+    citation_log_id: str = None,
+    user_id: str = None,
+    project_id: str = None,
+    workbench_document_id: str = None,
+    document_id: str = None,
+    chunk_id: str = None,
+    citation_text: str = None,
+    citation_format: str = '[author_name, paper_name]',
+    metadata_json=None,
+) -> str:
+    """Save a citation rendering log entry."""
+    if not user_id:
+        raise ValueError("user_id is required")
+    if not project_id:
+        project_id = create_default_project(user_id)
+
+    citation_log_id = citation_log_id or _new_id()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT OR REPLACE INTO citation_logs (
+                citation_log_id, user_id, project_id, workbench_document_id,
+                document_id, chunk_id, citation_text, citation_format,
+                metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                citation_log_id, user_id, project_id, workbench_document_id,
+                document_id, chunk_id, citation_text, citation_format,
+                _json_text(metadata_json), _utc_now(),
+            )
+        )
+        conn.commit()
+    return citation_log_id
 
 
 # ── Research Notes ────────────────────────────────────────────────────────────

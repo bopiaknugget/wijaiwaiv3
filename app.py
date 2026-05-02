@@ -1,14 +1,6 @@
 """
-Research Workbench — AI-Powered RAG with Text Notes
-3-panel layout: Sidebar (Docs + Notes) | Center (Research Workbench) | Right (Assistant chat)
-
-Key features in this version:
-- Pinecone vector database with per-user namespace isolation
-- Google OAuth 2.0 login with splash screen
-- Advanced RAG: rich metadata, parent-child chunking, summary embeddings
-- Adaptive chunk sizing based on content length
-- Retrieval with parent expansion for full-context answers
-- @st.cache_resource on embeddings; @st.cache_data on note loading
+Wijaiwai Research Workspace.
+3-panel layout: Sidebar (Reference Vault) | Center (Workbench) | Right (Chat Assistant).
 """
 
 import gc
@@ -29,7 +21,6 @@ from document_loader import (
     load_document, chunk_documents,
     enrich_metadata, create_parent_child_chunks, create_summary_documents,
 )
-from citation_generator import generate_citation_output
 from generator import (
     generate_answer,
     generate_answer_stream,
@@ -44,22 +35,54 @@ from generator import (
     is_edit_intent,
 )
 from reviewer import review_research, analyze_papers_critically_stream
-from web_scraper import scrape_url, summarize_content, generate_title, prepare_web_chunks
 from vector_store import (
     get_embedding_model,
     get_pinecone_index,
     upsert_documents,
     ingest_documents,
-    ingest_note,
     retrieve_unified,
     enhanced_retrieve,
     delete_document,
-    delete_by_metadata,
 )
 
 
 _THINK_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
 WORK_DIR = os.path.join(os.path.dirname(__file__), "user_data")
+INSUFFICIENT_VAULT_FALLBACK = (
+    "No sufficient supporting paper was found in the Reference Vault. "
+    "Upload or import a relevant paper before using this as a research-grounded answer."
+)
+REFERENCE_VAULT_SOURCE_TYPES = {"document", "reference_document"}
+
+
+def _is_reference_vault_doc(doc) -> bool:
+    metadata = getattr(doc, "metadata", {}) or {}
+    source_type = metadata.get("source_type", metadata.get("source", "document"))
+    return source_type in REFERENCE_VAULT_SOURCE_TYPES
+
+
+def _filter_reference_vault_docs(docs):
+    return [doc for doc in (docs or []) if _is_reference_vault_doc(doc)]
+
+
+def _render_reference_vault_sources(docs, empty_caption=INSUFFICIENT_VAULT_FALLBACK):
+    docs = _filter_reference_vault_docs(docs)
+    if not docs:
+        st.caption(empty_caption)
+        return
+    for i, doc in enumerate(docs, 1):
+        metadata = doc.metadata or {}
+        title = (
+            metadata.get("paper_title")
+            or metadata.get("filename")
+            or metadata.get("source")
+            or "Untitled paper"
+        )
+        author = metadata.get("author_display") or metadata.get("author") or "Unknown author"
+        st.markdown(f"**Paper {i}:** {title}")
+        st.caption(f"Reference Vault | {author}")
+        preview = doc.page_content
+        st.text(preview[:300] + "..." if len(preview) > 300 else preview)
 
 
 # ── Editor Document helpers (SQLite-backed, per-user) ─────────────────────────
@@ -299,7 +322,7 @@ def _show_login_page():
         <div class="login-card">
             {"<img class='login-banner' src='data:image/jpeg;base64," + _b64 + "' />" if _b64 else ""}
             <h1 class="login-title">WijaiWai</h1>
-            <p class="login-subtitle">AI-Powered Research Assistant</p>
+            <p class="login-subtitle">AI Research Workspace</p>
             <a href="{auth_url}" class="google-btn">
                 {google_svg}
                 Sign in with Google
@@ -312,64 +335,6 @@ def _show_login_page():
         </div>
     </div>
     """, unsafe_allow_html=True)
-
-
-# ============================================================================
-# Web Edit Dialog
-# ============================================================================
-
-@st.dialog("แก้ไขชื่อ")
-def _show_web_edit_dialog(web_page_id: int, user_id: str):
-    """Pop-up สำหรับแก้ไขชื่อเว็บเพจ"""
-    wp = database.get_web_page_by_id(web_page_id)
-    if wp is None:
-        st.error("ไม่พบข้อมูลนี้")
-        if st.button("ปิด", key="web_edit_close_err"):
-            del st.session_state._web_edit_id
-            st.rerun()
-        return
-
-    st.caption(f"🔗 {wp['url']}")
-
-    edit_title = st.text_input(
-        "ชื่อ",
-        value=wp['title'],
-        key="web_edit_dialog_title"
-    )
-
-    col_save, col_cancel = st.columns(2)
-    with col_save:
-        save_clicked = st.button(
-            "บันทึก", type="primary",
-            key="web_edit_dialog_save",
-            use_container_width=True
-        )
-    with col_cancel:
-        cancel_clicked = st.button(
-            "ยกเลิก",
-            key="web_edit_dialog_cancel",
-            use_container_width=True
-        )
-
-    if cancel_clicked:
-        del st.session_state._web_edit_id
-        st.rerun()
-
-    if save_clicked:
-        if not edit_title.strip():
-            st.warning("กรุณาระบุชื่อ")
-            return
-
-        with st.spinner("กำลังบันทึก..."):
-            try:
-                # อัปเดตชื่อใน SQLite
-                database.update_web_page_title(web_page_id, edit_title.strip())
-                # Note: Pinecone metadata updates require re-upserting
-                # For simplicity, title update is SQLite-only
-                del st.session_state._web_edit_id
-                st.rerun()
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาด: {str(e)}")
 
 
 # ============================================================================
@@ -427,8 +392,6 @@ def main():
         "input_tokens": 0,
         "output_tokens": 0,
         "total_cost_thb": 0.0,
-        "note_title_val": "",
-        "note_content_val": "",
         "work_title_val": "",
         "work_content_val": "",
         "work_current_file": None,
@@ -801,10 +764,9 @@ def main():
     """, unsafe_allow_html=True)
 
     # ============================================================================
-    # SIDEBAR — User Profile + Documents + Notes tabs
+    # LEFT PANEL: Reference Vault
     # ============================================================================
     with st.sidebar:
-        # ── User profile & logout ─────────────────────────────────────────
         col_user, col_logout = st.columns([4, 1])
         with col_user:
             user_display = user.get("name", user.get("email", "User"))
@@ -820,7 +782,7 @@ def main():
             else:
                 st.markdown(f"**{user_display}**")
         with col_logout:
-            if st.button("🚪", key="logout_btn", help="Logout"):
+            if st.button("Logout", key="logout_btn", help="Logout"):
                 st.session_state.user = None
                 st.session_state._app_initialized = False
                 for key in list(st.session_state.keys()):
@@ -829,392 +791,191 @@ def main():
                 st.rerun()
 
         st.divider()
-
         st.markdown("""
         <div style="font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;">
-            📚 แหล่งข้อมูล
+            Reference Vault
         </div>""", unsafe_allow_html=True)
 
-        sidebar_tab_docs, sidebar_tab_notes, sidebar_tab_web = st.tabs(
-            ["📄 Documents", "📝 Notes", "🌐 Web"]
+        st.markdown("**Upload paper**")
+        _uploaded_file = st.file_uploader(
+            "Select PDF paper",
+            type=["pdf"],
+            accept_multiple_files=False,
+            key="file_uploader_sidebar",
+            help="PDF-first upload for the Docling target pipeline.",
         )
+        st.caption("PDF-first paper uploads only. TXT/DOC/DOCX generic knowledge uploads are outside active v3 scope.")
+        uploaded_files = [_uploaded_file] if _uploaded_file is not None else []
 
-        # ── Tab 1: Documents ──────────────────────────────────────────────────
-        with sidebar_tab_docs:
-            st.markdown("**Upload Documents**")
-            _uploaded_file = st.file_uploader(
-                "Select file (PDF, TXT, DOCX, DOC)",
-                type=["pdf", "txt", "docx", "doc"],
-                accept_multiple_files=False,
-                key="file_uploader_sidebar"
-            )
-            st.caption("⚠️ อัปโหลดได้ครั้งละ 1 ไฟล์ · ขนาดไฟล์สูงสุด 15 MB")
-            uploaded_files = [_uploaded_file] if _uploaded_file is not None else []
+        if uploaded_files:
+            st.caption(f"1 paper selected: {uploaded_files[0].name}")
+            if st.button("Process paper", type="primary", key="process_doc_btn", use_container_width=True):
+                _MAX_DOCS = 5
+                _MAX_FILE_BYTES = 15 * 1024 * 1024
+                _current_doc_count = len(st.session_state.processed_docs)
+                _slots_remaining = _MAX_DOCS - _current_doc_count
 
-            if uploaded_files:
-                st.caption(f"1 file selected: {uploaded_files[0].name}")
-                if st.button("🔄 Process Documents", type="primary",
-                             key="process_doc_btn", use_container_width=True):
-                    # ── Limit: max 5 docs total, max 15 MB per file ───────────
-                    _MAX_DOCS = 5
-                    _MAX_FILE_BYTES = 15 * 1024 * 1024  # 15 MB
-                    _current_doc_count = len(st.session_state.processed_docs)
-                    _slots_remaining = _MAX_DOCS - _current_doc_count
-
-                    # Filter out oversized files upfront
-                    _valid_files = []
-                    for _uf in uploaded_files:
-                        _file_size = len(_uf.getvalue())
-                        if _file_size == 0:
-                            st.error(f"❌ {_uf.name}: ไฟล์ว่างเปล่า ข้ามไฟล์นี้")
-                        elif _file_size > _MAX_FILE_BYTES:
-                            st.error(
-                                f"❌ {_uf.name}: ไฟล์ขนาดใหญ่เกินไป "
-                                f"({_file_size / 1024 / 1024:.1f} MB) — จำกัดสูงสุด 15 MB"
-                            )
-                        else:
-                            _valid_files.append(_uf)
-
-                    if _slots_remaining <= 0:
-                        st.error(
-                            f"❌ ถึงขีดจำกัด {_MAX_DOCS} ไฟล์แล้ว "
-                            "กรุณาลบเอกสารเก่าก่อนเพิ่มไฟล์ใหม่"
-                        )
-                        _valid_files = []
-                    elif len(_valid_files) > _slots_remaining:
-                        st.warning(
-                            f"⚠️ สามารถเพิ่มได้อีก {_slots_remaining} ไฟล์เท่านั้น "
-                            f"(จะประมวลผลเฉพาะ {_slots_remaining} ไฟล์แรก)"
-                        )
-                        _valid_files = _valid_files[:_slots_remaining]
-
-                    all_child_chunks = []
-                    all_parent_records = []
-                    all_summary_docs = []
-                    new_doc_entries = []
-
-                    with st.spinner(f"Processing {len(_valid_files)} file(s) with Advanced RAG..."):
-                        for uploaded_file in _valid_files:
-                            try:
-                                ext = os.path.splitext(uploaded_file.name)[1].lower()
-                                # Validate extension
-                                if ext not in ('.pdf', '.txt', '.docx', '.doc'):
-                                    st.error(f"❌ {uploaded_file.name}: ประเภทไฟล์ไม่รองรับ")
-                                    continue
-                                with tempfile.NamedTemporaryFile(
-                                    delete=False, suffix=ext
-                                ) as tmp_file:
-                                    tmp_file.write(uploaded_file.getvalue())
-                                    tmp_path = tmp_file.name
-
-                                # Load and enrich with rich metadata
-                                documents = load_document(tmp_path)
-                                documents = enrich_metadata(
-                                    documents, uploaded_file.name,
-                                    source_type="document"
-                                )
-
-                                # Parent-Child Chunking (adaptive sizing)
-                                child_chunks, parent_records = create_parent_child_chunks(
-                                    documents, uploaded_file.name,
-                                    source_type="document"
-                                )
-
-                                # Summary Embedding (extractive fallback)
-                                summary_docs = create_summary_documents(
-                                    documents, uploaded_file.name
-                                )
-
-                                # Save document metadata to SQLite (scoped to user)
-                                doc_id = database.save_document_metadata(
-                                    filename=uploaded_file.name,
-                                    file_type=ext.lstrip('.'),
-                                    chunk_count=len(child_chunks),
-                                    db_path="pinecone",
-                                    user_id=user_id,
-                                )
-                                # Inject doc_id into child chunk metadata
-                                for chunk in child_chunks:
-                                    chunk.metadata['doc_id'] = doc_id
-                                if summary_docs:
-                                    for sdoc in summary_docs:
-                                        sdoc.metadata['doc_id'] = doc_id
-
-                                all_child_chunks.extend(child_chunks)
-                                all_parent_records.extend(parent_records)
-                                all_summary_docs.extend(summary_docs)
-                                new_doc_entries.append({
-                                    "name": uploaded_file.name,
-                                    "chunks": len(child_chunks),
-                                    "doc_id": doc_id,
-                                })
-                                os.unlink(tmp_path)
-                            except Exception as e:
-                                st.error(f"❌ {uploaded_file.name}: {str(e)}")
-
-                        if all_child_chunks:
-                            try:
-                                # Ingest into Pinecone under user's namespace
-                                ingest_documents(
-                                    all_child_chunks,
-                                    all_parent_records,
-                                    user_id,
-                                    all_summary_docs,
-                                    embedding_model,
-                                )
-
-                                existing_names = {d["name"] for d in st.session_state.processed_docs}
-                                st.session_state.processed_docs.extend(
-                                    e for e in new_doc_entries if e["name"] not in existing_names
-                                )
-                                st.session_state.messages = []
-                                st.session_state.total_tokens = 0
-                                st.session_state.input_tokens = 0
-                                st.session_state.output_tokens = 0
-                                st.session_state.total_cost_thb = 0.0
-                                st.success(
-                                    f"✅ {len(new_doc_entries)}/{len(_valid_files)} "
-                                    "file(s) ready! (Advanced RAG)"
-                                )
-                            except Exception as e:
-                                st.error(f"❌ Vector store error: {str(e)}")
-
-            # ── Processed documents list with Delete buttons ───────────────
-            if st.session_state.processed_docs:
-                st.divider()
-                st.caption(f"{len(st.session_state.processed_docs)} document(s) loaded")
-                for _di, doc_entry in enumerate(list(st.session_state.processed_docs)):
-                    col_info, col_del = st.columns([5, 1])
-                    with col_info:
-                        st.markdown(f"📄 **{doc_entry['name']}**")
-                        st.caption(f"{doc_entry['chunks']} chunks")
-                    with col_del:
-                        if st.button("🗑️", key=f"del_doc_{_di}",
-                                     help="Delete this document"):
-                            # Remove chunks from Pinecone
-                            try:
-                                delete_document(doc_entry["name"], user_id)
-                            except Exception as e:
-                                st.error(f"VectorDB delete error: {e}")
-                            # Remove parent chunks from SQLite
-                            database.delete_parent_chunks_by_source(doc_entry["name"])
-                            # Remove document metadata from SQLite (scoped to user)
-                            if doc_entry.get("doc_id"):
-                                database.delete_document_by_id(doc_entry["doc_id"], user_id)
-                            # Remove from tracking list immediately
-                            st.session_state.processed_docs = [
-                                d for d in st.session_state.processed_docs
-                                if d["name"] != doc_entry["name"]
-                            ]
-                            st.rerun()
-
-        # ── Tab 2: Notes ──────────────────────────────────────────────────────
-        with sidebar_tab_notes:
-            note_title_input = st.text_input(
-                "Title",
-                value=st.session_state.note_title_val,
-                placeholder="Note title...",
-                key="note_title_input_sidebar"
-            )
-            note_content_input = st.text_area(
-                "Content",
-                value=st.session_state.note_content_val,
-                placeholder="Write your research notes here...",
-                height=160,
-                key="note_content_input_sidebar"
-            )
-            save_note_clicked = st.button(
-                "💾 Save Note", type="primary",
-                key="save_note_btn_sidebar", use_container_width=True
-            )
-
-            if save_note_clicked:
-                if note_title_input.strip() and note_content_input.strip():
-                    with st.spinner("Saving note..."):
-                        note_id = database.save_note(
-                            note_title_input, note_content_input, user_id
-                        )
-                        # Embed into Pinecone with source_type='note'
-                        ingest_note(
-                            note_id, note_title_input, note_content_input,
-                            user_id, embedding_model,
-                        )
-                    st.success(f"✅ Saved '{note_title_input}' (ID: {note_id})")
-                    st.session_state.note_title_val = ""
-                    st.session_state.note_content_val = ""
-                    st.rerun()
-                else:
-                    st.warning("⚠️ Please enter both title and content.")
-
-            st.divider()
-
-            # ── Saved notes list with Delete buttons ────
-            notes = database.load_all_notes(user_id)
-            if notes:
-                st.caption(f"{len(notes)} note(s) saved")
-                for note in notes:
-                    col_info, col_del = st.columns([5, 1])
-                    with col_info:
-                        st.markdown(f"📝 **{note['title']}**")
-                        st.caption(note['timestamp'])
-                    with col_del:
-                        if st.button("🗑️", key=f"del_note_{note['id']}",
-                                     help="Delete this note"):
-                            # 1. Remove from SQLite (scoped to user)
-                            database.delete_note_by_id(note['id'], user_id)
-                            # 2. Remove from Pinecone
-                            try:
-                                delete_by_metadata("note_id", note['id'], user_id)
-                            except Exception as e:
-                                st.error(f"VectorDB delete error: {e}")
-                            st.rerun()
-                    # Content preview in a collapsed expander below the row
-                    with st.expander("ดูเนื้อหา", expanded=False):
-                        st.text_area(
-                            "",
-                            value=note['content'],
-                            height=90,
-                            disabled=True,
-                            key=f"note_view_{note['id']}"
-                        )
-            else:
-                st.info("No notes saved yet.")
-
-        # ── Tab 3: Web ─────────────────────────────────────────────────────
-        with sidebar_tab_web:
-            st.markdown("**เพิ่มข้อมูลจากเว็บ**")
-            web_url_input = st.text_input(
-                "ลิงก์เว็บไซต์",
-                placeholder="วาง URL ที่นี่ เช่น https://...",
-                key="web_url_input",
-                label_visibility="collapsed"
-            )
-
-            scrape_clicked = st.button(
-                "🔍 ดึงข้อมูลจาก web เข้าฐานข้อมูล",
-                type="primary",
-                key="scrape_btn",
-                use_container_width=True,
-                disabled=not web_url_input.strip()
-            )
-
-            if scrape_clicked and web_url_input.strip():
-                total_input_tokens = 0
-                total_output_tokens = 0
-
-                with st.status("กำลังดึงข้อมูล...", expanded=True) as status:
-                    st.write("กำลังเปิดหน้าเว็บ...")
-                    scrape_result = scrape_url(web_url_input.strip())
-
-                    if not scrape_result['success']:
-                        status.update(label="ไม่สำเร็จ", state="error")
-                        st.error(scrape_result['error'])
+                _valid_files = []
+                for _uf in uploaded_files:
+                    _file_size = len(_uf.getvalue())
+                    ext = os.path.splitext(_uf.name)[1].lower()
+                    if ext != '.pdf':
+                        st.error(f"{_uf.name}: only PDF papers are active in the v3 Reference Vault UI.")
+                    elif _file_size == 0:
+                        st.error(f"{_uf.name}: empty file skipped.")
+                    elif _file_size > _MAX_FILE_BYTES:
+                        st.error(f"{_uf.name}: file is too large ({_file_size / 1024 / 1024:.1f} MB). Maximum is 15 MB.")
                     else:
-                        web_content = scrape_result['content']
-                        st.write("กำลังอ่านและสรุปเนื้อหา...")
-                        summary_result = summarize_content(web_content)
+                        _valid_files.append(_uf)
 
-                        if not summary_result['success']:
-                            status.update(label="ไม่สำเร็จ", state="error")
-                            st.error(summary_result['error'])
-                        else:
-                            summary_text = summary_result['summary']
-                            total_input_tokens += summary_result['input_tokens']
-                            total_output_tokens += summary_result['output_tokens']
+                if _slots_remaining <= 0:
+                    st.error(f"Reference Vault limit reached ({_MAX_DOCS} papers). Delete an old paper before uploading a new one.")
+                    _valid_files = []
+                elif len(_valid_files) > _slots_remaining:
+                    st.warning(f"Only {_slots_remaining} more paper(s) can be added.")
+                    _valid_files = _valid_files[:_slots_remaining]
 
-                            st.write("กำลังตั้งชื่อ...")
-                            title_result = generate_title(web_content)
-                            if title_result['success']:
-                                auto_title = title_result['title']
-                                total_input_tokens += title_result['input_tokens']
-                                total_output_tokens += title_result['output_tokens']
-                            else:
-                                auto_title = web_content[:60].replace('\n', ' ').strip()
+                all_child_chunks = []
+                all_parent_records = []
+                all_summary_docs = []
+                new_doc_entries = []
 
-                            st.write("กำลังบันทึกลงฐานข้อมูล...")
-                            try:
-                                web_page_id = database.save_web_page(
-                                    url=scrape_result['url'],
-                                    title=auto_title,
-                                    summary=summary_text,
-                                    chunk_count=0,
-                                    user_id=user_id,
-                                )
+                with st.spinner(f"Processing {len(_valid_files)} paper(s) for Reference Vault..."):
+                    for uploaded_file in _valid_files:
+                        try:
+                            ext = os.path.splitext(uploaded_file.name)[1].lower()
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+                                tmp_file.write(uploaded_file.getvalue())
+                                tmp_path = tmp_file.name
 
-                                child_chunks, parent_records = prepare_web_chunks(
-                                    summary_text, auto_title,
-                                    scrape_result['url'],
-                                    web_page_id=web_page_id,
-                                )
+                            documents = load_document(tmp_path)
+                            documents = enrich_metadata(
+                                documents, uploaded_file.name,
+                                source_type="document",
+                            )
 
-                                ingest_documents(
-                                    child_chunks,
-                                    parent_records,
-                                    user_id,
-                                    embedding_model=embedding_model,
-                                )
+                            child_chunks, parent_records = create_parent_child_chunks(
+                                documents, uploaded_file.name,
+                                source_type="document",
+                            )
+                            summary_docs = create_summary_documents(documents, uploaded_file.name)
 
-                                database.update_web_page(
-                                    web_page_id, auto_title, summary_text,
-                                    chunk_count=len(child_chunks),
-                                )
+                            doc_id = database.save_document_metadata(
+                                filename=uploaded_file.name,
+                                file_type=ext.lstrip('.'),
+                                chunk_count=len(child_chunks),
+                                db_path="pinecone",
+                                user_id=user_id,
+                            )
+                            for chunk in child_chunks:
+                                chunk.metadata['doc_id'] = doc_id
+                            if summary_docs:
+                                for sdoc in summary_docs:
+                                    sdoc.metadata['doc_id'] = doc_id
 
-                                st.session_state.total_tokens += total_input_tokens + total_output_tokens
-                                st.session_state.input_tokens += total_input_tokens
-                                st.session_state.output_tokens += total_output_tokens
-                                database.record_token_usage(
-                                    user_id, total_input_tokens, total_output_tokens, "web_scrape"
-                                )
+                            all_child_chunks.extend(child_chunks)
+                            all_parent_records.extend(parent_records)
+                            all_summary_docs.extend(summary_docs)
+                            new_doc_entries.append({
+                                "name": uploaded_file.name,
+                                "chunks": len(child_chunks),
+                                "doc_id": doc_id,
+                                "status": "active",
+                            })
+                            os.unlink(tmp_path)
+                        except Exception as e:
+                            st.error(f"{uploaded_file.name}: {str(e)}")
 
-                                status.update(label="เสร็จสิ้น", state="complete")
-                                st.success(f"บันทึกแล้ว — **{auto_title}**")
-                            except Exception as e:
-                                status.update(label="ไม่สำเร็จ", state="error")
-                                st.error(f"เกิดข้อผิดพลาด: {str(e)}")
+                    if all_child_chunks:
+                        try:
+                            ingest_documents(
+                                all_child_chunks,
+                                all_parent_records,
+                                user_id,
+                                all_summary_docs,
+                                embedding_model,
+                            )
+                            existing_names = {d["name"] for d in st.session_state.processed_docs}
+                            st.session_state.processed_docs.extend(
+                                e for e in new_doc_entries if e["name"] not in existing_names
+                            )
+                            st.session_state.messages = []
+                            st.session_state.total_tokens = 0
+                            st.session_state.input_tokens = 0
+                            st.session_state.output_tokens = 0
+                            st.session_state.total_cost_thb = 0.0
+                            st.success(f"{len(new_doc_entries)}/{len(_valid_files)} paper(s) ready in Reference Vault.")
+                        except Exception as e:
+                            st.error(f"Vector index error: {str(e)}")
 
-            # ── รายการเว็บที่บันทึกไว้ ──
-            web_pages = database.load_all_web_pages(user_id)
-            if web_pages:
-                st.divider()
-                st.caption(f"เว็บที่บันทึกไว้ ({len(web_pages)})")
+        st.divider()
+        st.markdown("**OpenAlex metadata discovery**")
+        st.text_input(
+            "Search OpenAlex",
+            placeholder="Search by title, DOI, author, or topic",
+            key="openalex_search_input",
+            disabled=True,
+        )
+        st.button(
+            "Search OpenAlex",
+            key="openalex_search_btn",
+            use_container_width=True,
+            disabled=True,
+        )
+        st.info("OpenAlex import is unavailable in this UI phase because backend search/import hooks are not complete. Imported metadata will appear here as metadata_only when the backend hook is available.")
 
-                for wp in web_pages:
-                    col_info, col_edit, col_del = st.columns([4, 1, 1])
-                    with col_info:
-                        st.markdown(f"🌐 **{wp['title']}**")
-                        st.caption(wp['timestamp'])
-                    with col_edit:
-                        if st.button("✏️", key=f"edit_web_{wp['id']}",
-                                     help="แก้ไขชื่อ"):
-                            st.session_state._web_edit_id = wp['id']
-                            st.rerun()
-                    with col_del:
-                        if st.button("🗑️", key=f"del_web_{wp['id']}",
-                                     help="ลบออก"):
-                            try:
-                                delete_document(wp['url'], user_id)
-                            except Exception:
-                                pass
-                            database.delete_parent_chunks_by_source(wp['url'])
-                            database.delete_web_page_by_id(wp['id'], user_id)
-                            st.rerun()
+        st.divider()
+        st.markdown("**Vault paper list**")
+        try:
+            _vault_docs = database.list_reference_vault_documents(user_id)
+        except Exception:
+            _vault_docs = []
 
-            # ── Pop-up แก้ไขชื่อ ──
-            _web_edit_id = st.session_state.get("_web_edit_id")
-            if _web_edit_id is not None:
-                _show_web_edit_dialog(_web_edit_id, user_id)
+        if _vault_docs:
+            st.caption(f"{len(_vault_docs)} Reference Vault record(s)")
+            for _rv in _vault_docs:
+                _paper_name = _rv.get("paper_name") or _rv.get("filename") or "Untitled paper"
+                _author = _rv.get("author_display") or "Unknown author"
+                _status = _rv.get("status") or "active"
+                st.markdown(f"**{_paper_name}**")
+                st.caption(f"{_author} | status: {_status}")
+                if _status == "metadata_only" or (_rv.get("source_type") == "openalex" and not _rv.get("storage_path")):
+                    st.warning("Metadata only: no uploaded/full-text paper is available for evidence-backed RAG or citation.")
+        elif st.session_state.processed_docs:
+            st.caption(f"{len(st.session_state.processed_docs)} uploaded paper(s) in the legacy document store")
+            for _di, doc_entry in enumerate(list(st.session_state.processed_docs)):
+                col_info, col_del = st.columns([5, 1])
+                with col_info:
+                    st.markdown(f"**{doc_entry['name']}**")
+                    st.caption(f"{doc_entry['chunks']} chunks | status: active")
+                with col_del:
+                    if st.button("Delete", key=f"del_doc_{_di}", help="Delete this paper"):
+                        try:
+                            delete_document(doc_entry["name"], user_id)
+                        except Exception as e:
+                            st.error(f"Vector index delete error: {e}")
+                        database.delete_parent_chunks_by_source(doc_entry["name"])
+                        if doc_entry.get("doc_id"):
+                            database.delete_document_by_id(doc_entry["doc_id"], user_id)
+                        st.session_state.processed_docs = [
+                            d for d in st.session_state.processed_docs
+                            if d["name"] != doc_entry["name"]
+                        ]
+                        st.rerun()
+        else:
+            st.info("No papers in the Reference Vault yet. Upload a PDF paper or import OpenAlex metadata when available.")
 
 
     # ============================================================================
-    # MAIN CONTENT: Center (Research Workbench) | Right (Assistant)
+    # MAIN CONTENT: Center (Workbench) | Right (Chat Assistant)
     # ============================================================================
     col_center, col_right = st.columns([3, 2], gap="large")
 
-    # ── Center: Research Workbench ─────────────────────────────────────────────────────
+    # ── Center: Workbench ─────────────────────────────────────────────────────
     with col_center:
         st.markdown("""
         <div style="font-size:17px;font-weight:700;color:#1f2937;padding:0.25rem 0 0.2rem 0;">
-            📝 Research Workbench
+            📝 Workbench
         </div>""", unsafe_allow_html=True)
 
         _current_file_preview = st.session_state.get("work_current_file")
@@ -1291,6 +1052,7 @@ def main():
                                 guide_topic.strip(), user_id, k=5,
                                 source_type="document",
                             )
+                            _guide_docs = _filter_reference_vault_docs(_guide_docs)
                             st.session_state.research_guide_retrieved_docs = _guide_docs
                             _guide_text, _guide_input_tokens, _guide_output_tokens = (
                                 generate_research_guide(
@@ -1363,13 +1125,13 @@ def main():
                 _doc_names = [d["filename"] for d in _kb_docs]
                 if _doc_names:
                     _selected_docs = st.multiselect(
-                        "เลือกเอกสารจาก Knowledge Base",
+                        "เลือกเอกสารจาก Reference Vault",
                         options=_doc_names,
                         key="sec_selected_docs",
                         placeholder="เลือกอย่างน้อย 1 เอกสาร...",
                     )
                 else:
-                    st.caption("ยังไม่มีเอกสารใน Knowledge Base")
+                    st.caption("ยังไม่มีเอกสารใน Reference Vault")
                     _selected_docs = []
             else:
                 _selected_docs = []
@@ -1470,19 +1232,10 @@ def main():
                             f'<div class="think-block">{_sdoc_think}</div>',
                             unsafe_allow_html=True,
                         )
-                _sdoc_docs = st.session_state.get("section_retrieved_docs")
-                if _sdoc_docs is not None:
-                    _sdoc_ref_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_sdoc_docs)} รายการ" if _sdoc_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
-                    with st.expander(_sdoc_ref_label, expanded=False):
-                        if _sdoc_docs:
-                            for i, doc in enumerate(_sdoc_docs, 1):
-                                src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
-                                label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
-                                st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
-                                preview = doc.page_content
-                                st.text(preview[:300] + "..." if len(preview) > 300 else preview)
-                        else:
-                            st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
+                _sdoc_docs = _filter_reference_vault_docs(st.session_state.get("section_retrieved_docs"))
+                _sdoc_ref_label = f"Reference Vault sources - {len(_sdoc_docs)} paper(s)" if _sdoc_docs else "Reference Vault sources - insufficient evidence"
+                with st.expander(_sdoc_ref_label, expanded=False):
+                    _render_reference_vault_sources(_sdoc_docs)
             _sdb1, _sdb2, _sdb3 = st.columns(3)
             with _sdb1:
                 if st.button("📥 Replace Content in Editor", key="sec_doc_replace_btn", use_container_width=True):
@@ -1570,7 +1323,7 @@ def main():
                          key="advisor_review_btn", use_container_width=True):
                 editor_text = st.session_state.get("work_content_input", "")
                 if not editor_text or not editor_text.strip():
-                    st.warning("⚠️ ไม่มีเนื้อหาใน Research Workbench ให้ตรวจ")
+                    st.warning("⚠️ ไม่มีเนื้อหาใน Workbench ให้ตรวจ")
                 else:
                     with st.spinner("🎓 อาจารย์กำลังตรวจงาน..."):
                         try:
@@ -1589,6 +1342,7 @@ def main():
                                 )
                             except Exception:
                                 _review_retrieved = []
+                            _review_retrieved = _filter_reference_vault_docs(_review_retrieved)
                             st.session_state.review_retrieved_docs = _review_retrieved
                             review_text, ri, ro = review_research(
                                 editor_text,
@@ -1605,39 +1359,23 @@ def main():
                         except Exception as e:
                             st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
 
-        # ── Auto Citation (APA7) Section ──────────────────────────────────
-        with st.expander("📚 สร้างรายการอ้างอิง (Auto Citation - APA7)", expanded=False):
-            st.caption("สร้างรายการอ้างอิงอัตโนมัติจากเอกสารใน Knowledge Base — ใช้ AI ช่วยแทรกการอ้างอิงในเนื้อหา")
-            if st.button("📚 สร้างรายการอ้างอิง", type="primary",
-                         key="auto_citation_btn", use_container_width=True):
-                editor_text = st.session_state.get("work_content_input", "")
-                if not editor_text or not editor_text.strip():
-                    st.warning("⚠️ ไม่มีเนื้อหาใน Research Workbench — กรุณาเขียนเนื้อหาก่อน")
-                elif not st.session_state.processed_docs:
-                    st.warning("⚠️ ไม่มีเอกสารใน Knowledge Base — กรุณาอัปโหลดเอกสารก่อน")
-                else:
-                    with st.status("📚 กำลังวิเคราะห์และจับคู่เอกสารอ้างอิง...", expanded=True) as status:
-                        try:
-                            st.write("🔍 กำลังค้นหาเอกสารที่เกี่ยวข้องใน Knowledge Base...")
-                            cited_content, ref_markdown, citation_sources = generate_citation_output(
-                                editor_text, user_id
-                            )
-                            if citation_sources:
-                                st.write(f"✅ พบเอกสารอ้างอิง {len(citation_sources)} รายการ")
-                            else:
-                                st.write("⚠️ ไม่พบเอกสารที่ตรงกับเนื้อหา")
-                            status.update(
-                                label="📚 สร้างรายการอ้างอิงเสร็จสิ้น",
-                                state="complete",
-                                expanded=False,
-                            )
-                            st.session_state.citation_cited_content = cited_content
-                            st.session_state.citation_result = ref_markdown
-                            st.session_state.citation_sources = citation_sources
-                            st.rerun()
-                        except Exception as e:
-                            status.update(label="❌ เกิดข้อผิดพลาด", state="error")
-                            st.error(f"❌ เกิดข้อผิดพลาด: {str(e)}")
+        # Reference Vault Citation Section
+        with st.expander("Reference Vault citations", expanded=False):
+            st.caption(
+                "Citations must be rendered by the backend from SQLite Reference Vault metadata "
+                "in [author_name, paper_name] format."
+            )
+            st.button(
+                "Generate Reference Vault citations",
+                type="primary",
+                key="auto_citation_btn",
+                use_container_width=True,
+                disabled=True,
+            )
+            st.info(
+                "Citation generation is disabled until the backend-verified citation renderer is available. "
+                "Legacy citation output is not exposed as v3 citation output."
+            )
 
         # ── Compare / Critically Analyze Papers Section ────────────────────────
         with st.expander("🔬 วิเคราะห์-เปรียบเทียบงานวิจัย ในแหล่งความรู้", expanded=False):
@@ -2055,120 +1793,56 @@ def main():
                             unsafe_allow_html=True,
                         )
                 _render_review_result(_review_body)
-                _rev_docs = st.session_state.get("review_retrieved_docs")
-                if _rev_docs is not None:
-                    _rev_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_rev_docs)} รายการ" if _rev_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
-                    with st.expander(_rev_label, expanded=False):
-                        if _rev_docs:
-                            for i, doc in enumerate(_rev_docs, 1):
-                                src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
-                                label = "📝 Note" if src_type in ("note", "research_note") else f"📄 Doc {i}"
-                                st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
-                                preview = doc.page_content
-                                st.text(preview[:300] + "..." if len(preview) > 300 else preview)
-                        else:
-                            st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
+                _rev_docs = _filter_reference_vault_docs(st.session_state.get("review_retrieved_docs"))
+                _rev_label = f"Reference Vault sources - {len(_rev_docs)} paper(s)" if _rev_docs else "Reference Vault sources - insufficient evidence"
+                with st.expander(_rev_label, expanded=False):
+                    _render_reference_vault_sources(_rev_docs)
                 if st.button("🗑️ ล้างผลตรวจ", key="clear_review_btn",
                              use_container_width=True):
                     st.session_state.review_result = None
                     st.session_state.review_retrieved_docs = None
                     st.rerun()
 
-        # ── Auto Citation Result (below editor) ─────────────────────────────
+        # Reference Vault Citation Result
         if st.session_state.citation_result:
-            with st.expander("📚 รายการอ้างอิง (APA7)", expanded=True):
-                # Show cited content preview if available
-                if st.session_state.citation_cited_content:
-                    st.markdown("### เนื้อหาพร้อมการอ้างอิง (Preview)")
-                    # Highlight [Author, Year] citations with yellow <mark> tags
-                    _preview = re.sub(
-                        r'(\[[^\]]+?,\s*(?:\d{4}|n\.d\.)\])',
-                        r'<mark>\1</mark>',
-                        st.session_state.citation_cited_content
-                    )
-                    st.markdown(_preview, unsafe_allow_html=True)
-                    st.markdown("---")
+            with st.expander("Reference Vault citation result", expanded=True):
+                st.warning(
+                    "Existing citation output was generated by the legacy citation path and is not shown as v3 output. "
+                    "Regenerate after the backend-verified [author_name, paper_name] renderer is available."
+                )
+                if st.button("Clear citation result", key="reject_citation_btn", use_container_width=True):
+                    st.session_state.citation_result = None
+                    st.session_state.citation_cited_content = None
+                    st.session_state.citation_sources = []
+                    st.rerun()
 
-                # Show reference list
-                st.markdown(st.session_state.citation_result)
-
-                _cite_col1, _cite_col2 = st.columns(2)
-                with _cite_col1:
-                    if st.button("✅ เพิ่มรายการอ้างอิงในเอกสาร", type="primary",
-                                 key="accept_citation_btn", use_container_width=True):
-                        _current = st.session_state.get("work_content_val", "")
-                        # Push undo
-                        st.session_state.ai_edit_undo_stack.append(_current)
-                        if len(st.session_state.ai_edit_undo_stack) > 20:
-                            st.session_state.ai_edit_undo_stack.pop(0)
-                        st.session_state.ai_edit_redo_stack.clear()
-                        # Use cited content if available, otherwise current content
-                        _base = st.session_state.citation_cited_content or _current
-                        _new = _base + "\n\n---\n\n" + st.session_state.citation_result
-                        st.session_state["_pending_work_content"] = _new
-                        st.session_state.work_content_val = _new
-                        st.session_state.citation_result = None
-                        st.session_state.citation_cited_content = None
-                        st.session_state.citation_sources = []
-                        st.rerun()
-                with _cite_col2:
-                    if st.button("❌ ยกเลิก", key="reject_citation_btn",
-                                 use_container_width=True):
-                        st.session_state.citation_result = None
-                        st.session_state.citation_cited_content = None
-                        st.session_state.citation_sources = []
-                        st.rerun()
-
-        # ── Compare Papers Result (below editor) ──────────────────────────────
         if st.session_state.compare_result:
             with st.expander(
-                "🔬 ผลการวิเคราะห์เปรียบเทียบงานวิจัย",
+                "Compare papers result",
                 expanded=st.session_state.compare_expanded,
             ):
                 _cmp_think, _cmp_body = parse_think_content(
                     st.session_state.compare_result
                 )
                 if _cmp_think:
-                    with st.expander("💭 ความคิด (Thinking)", expanded=False):
+                    with st.expander("Thinking", expanded=False):
                         st.markdown(
                             f'<div class="think-block">{_cmp_think}</div>',
                             unsafe_allow_html=True,
                         )
                 st.markdown(_cmp_body)
-                _cmp_docs = st.session_state.get("compare_retrieved_docs")
-                if _cmp_docs is not None:
-                    _cmp_label = (
-                        f"📚 เอกสารอ้างอิงที่ใช้ — {len(_cmp_docs)} รายการ"
-                        if _cmp_docs
-                        else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
-                    )
-                    with st.expander(_cmp_label, expanded=False):
-                        if _cmp_docs:
-                            for i, doc in enumerate(_cmp_docs, 1):
-                                src_type = doc.metadata.get(
-                                    "source_type", doc.metadata.get("source", "doc")
-                                )
-                                label = (
-                                    "📝 Note"
-                                    if src_type in ("note", "research_note")
-                                    else f"📄 Doc {i}"
-                                )
-                                st.markdown(
-                                    f"**{label}:** "
-                                    f"{doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}"
-                                )
-                                preview = doc.page_content
-                                st.text(
-                                    preview[:300] + "..."
-                                    if len(preview) > 300
-                                    else preview
-                                )
-                        else:
-                            st.caption(
-                                "ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database"
-                            )
+                _cmp_docs = _filter_reference_vault_docs(
+                    st.session_state.get("compare_retrieved_docs")
+                )
+                _cmp_label = (
+                    f"Reference Vault sources - {len(_cmp_docs)} paper(s)"
+                    if _cmp_docs
+                    else "Reference Vault sources - insufficient evidence"
+                )
+                with st.expander(_cmp_label, expanded=False):
+                    _render_reference_vault_sources(_cmp_docs)
                 if st.button(
-                    "🗑️ ล้างผลวิเคราะห์",
+                    "Clear compare result",
                     key="clear_compare_btn",
                     use_container_width=True,
                 ):
@@ -2177,9 +1851,7 @@ def main():
                     st.rerun()
 
         st.divider()
-
-        # ── Session usage stats ────────────────────────────────────────────────
-        with st.expander("📈 Session Usage", expanded=False):
+        with st.expander("Session usage", expanded=False):
             _in_tok = st.session_state.get("input_tokens", 0)
             _out_tok = st.session_state.get("output_tokens", 0)
             _total_tok = _in_tok + _out_tok
@@ -2190,19 +1862,13 @@ def main():
                 unsafe_allow_html=True,
             )
 
-    # ── Right: Assistant Chat ─────────────────────────────────────────────────
+    # Right: Chat Assistant
     with col_right:
-        _logo_b64 = base64.b64encode(
-            pathlib.Path(__file__).parent.joinpath("pic", "logo.jpeg").read_bytes()
-        ).decode()
-        st.markdown(f"""
-        <div style="display:flex;align-items:center;gap:8px;padding:0.25rem 0 0.4rem 0;">
-            <img src="data:image/jpeg;base64,{_logo_b64}"
-                 style="height:28px;width:28px;border-radius:6px;object-fit:cover;" />
-            <span style="font-size:1.35rem;font-weight:700;color:#1f2937;">Assistant</span>
-        </div>""", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:1.35rem;font-weight:700;color:#1f2937;padding:0.25rem 0 0.4rem 0;'>Chat Assistant</div>",
+            unsafe_allow_html=True,
+        )
 
-        # ── Chat container (compact) — show only after first interaction ──
         if st.session_state.messages:
             chat_container = st.container(height=300)
             with chat_container:
@@ -2210,31 +1876,21 @@ def main():
                     with st.chat_message(message["role"]):
                         if message["role"] == "assistant":
                             if message.get("action") == "research":
-                                st.caption("🔬 Research — ผลลัพธ์อยู่ใน Research Workbench")
+                                st.caption("Research result is in the Workbench")
                             elif message.get("action") == "edit":
-                                st.caption("✏️ แก้ไขเอกสารแล้ว")
+                                st.caption("Workbench edited")
                             display_assistant_message(message["content"])
                             if "tokens" in message:
-                                st.caption(f"⏱️ {message['tokens']:,} tokens (turn)")
+                                st.caption(f"{message['tokens']:,} tokens (turn)")
                             if "sources" in message:
-                                _msg_docs = message["sources"]
-                                _msg_label = f"📚 เอกสารอ้างอิงที่ใช้ — {len(_msg_docs)} รายการ" if _msg_docs else "📚 เอกสารอ้างอิงที่ใช้ — ไม่พบเอกสาร"
+                                _msg_docs = _filter_reference_vault_docs(message["sources"])
+                                _msg_label = (
+                                    f"Reference Vault sources - {len(_msg_docs)} paper(s)"
+                                    if _msg_docs
+                                    else "Reference Vault sources - insufficient evidence"
+                                )
                                 with st.expander(_msg_label, expanded=False):
-                                    if _msg_docs:
-                                        for i, doc in enumerate(_msg_docs, 1):
-                                            src_type = doc.metadata.get("source_type", doc.metadata.get("source", "doc"))
-                                            label = (
-                                                "📝 Note" if src_type in ("note", "research_note")
-                                                else f"📄 Doc {i}"
-                                            )
-                                            st.markdown(f"**{label}:** {doc.metadata.get('paper_title', doc.metadata.get('filename', ''))}")
-                                            preview = doc.page_content
-                                            st.text(
-                                                preview[:300] + "..."
-                                                if len(preview) > 300 else preview
-                                            )
-                                    else:
-                                        st.caption("ไม่พบเอกสารอ้างอิงที่เกี่ยวข้องใน Vector Database — ใช้ความรู้ทั่วไปของ AI")
+                                    _render_reference_vault_sources(_msg_docs)
                         else:
                             st.write(message["content"])
 
@@ -2463,18 +2119,20 @@ def main():
         )
         prompt = st.chat_input(_input_placeholder, key="chat_input_main")
 
-        # ── Toggle: deep/short ────────────────────────────────────────────
         _deep_mode = st.toggle(
-            "📖 ตอบเชิงลึก",
+            "Deep answer",
             value=st.session_state._research_mode,
             key="_deep_toggle",
-            help="เปิด: AI ตอบละเอียด วิเคราะห์เชิงลึก | ปิด: ตอบสั้นกระชับ",
+            help="On: detailed research-style answer. Off: concise answer.",
         )
         st.session_state._research_mode = _deep_mode
 
-        # ── Clear chat button ─────────────────────────────────────────────
-        if st.button("🗑️ ล้างประวัติการสนทนา", key="clear_chat_btn", type="secondary",
-                     use_container_width=True):
+        if st.button(
+            "Clear chat history",
+            key="clear_chat_btn",
+            type="secondary",
+            use_container_width=True,
+        ):
             st.session_state.messages = []
             st.session_state.total_tokens = 0
             st.session_state.input_tokens = 0
@@ -2482,8 +2140,8 @@ def main():
             st.session_state.total_cost_thb = 0.0
             st.rerun()
 
+        # ── Detect content edit command from right-click overlay ──────
         if prompt:
-            # ── Detect content edit command from right-click overlay ──────
             if prompt.startswith("__EDIT__"):
                 try:
                     edit_data = json.loads(prompt[8:])
@@ -2503,6 +2161,7 @@ def main():
                             )
                         except Exception:
                             _sel_retrieved = []
+                        _sel_retrieved = _filter_reference_vault_docs(_sel_retrieved)
                         sel_think, edited, ri, ro = generate_selection_edit(
                             selected, instruction,
                             retrieved_docs=_sel_retrieved,
@@ -2575,6 +2234,7 @@ def main():
                             )
                         except Exception:
                             _ins_retrieved = []
+                        _ins_retrieved = _filter_reference_vault_docs(_ins_retrieved)
                         ins_think, inserted, ri, ro = generate_insertion(
                             context_before, context_after, instruction,
                             retrieved_docs=_ins_retrieved,
@@ -2645,7 +2305,8 @@ def main():
                     # ── Query routing: skip vector DB for small talk ──────────
                     # is_small_talk() detects greetings / meta-questions so we
                     # avoid an unnecessary Pinecone round-trip entirely.
-                    if not is_research and is_small_talk(actual_query):
+                    _is_small_talk = not is_research and is_small_talk(actual_query)
+                    if _is_small_talk:
                         retrieved_docs = []
                     else:
                         # Enhanced retrieval: query classification + reranking + fallback
@@ -2657,9 +2318,18 @@ def main():
                             use_query_router=True,
                             use_reranker=True,
                         )
+                        retrieved_docs = _filter_reference_vault_docs(retrieved_docs)
 
                     # ── Response generation ───────────────────────────────────
                     if is_research:
+                        if not retrieved_docs:
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": INSUFFICIENT_VAULT_FALLBACK,
+                                "sources": [],
+                                "action": "fallback",
+                            })
+                            st.rerun()
                         # Research mode: must receive structured JSON → use
                         # blocking call then display result after full response
                         spinner_text = "🔬 กำลังค้นคว้าเชิงลึก..."
@@ -2698,6 +2368,15 @@ def main():
                         # Lightweight local check: if user wants to edit the
                         # editor, use non-streaming path (needs JSON parsing).
                         _wants_edit = is_edit_intent(actual_query)
+
+                        if not _is_small_talk and not _wants_edit and not retrieved_docs:
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": INSUFFICIENT_VAULT_FALLBACK,
+                                "sources": [],
+                                "action": "fallback",
+                            })
+                            st.rerun()
 
                         if _wants_edit:
                             # Edit-capable chat: non-streaming, may return
