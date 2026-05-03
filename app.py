@@ -3,24 +3,20 @@ Wijaiwai Research Workspace.
 3-panel layout: Sidebar (Reference Vault) | Center (Workbench) | Right (Chat Assistant).
 """
 
-import gc
 import json
 import os
 import re
-import requests
-import shutil
 import tempfile
-import uuid
+
+from tls_config import sanitize_tls_ca_bundle_env
+
+sanitize_tls_ca_bundle_env()
+
+import requests
 import streamlit as st
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import database
 from auth import get_google_auth_url, handle_oauth_callback
-from document_loader import (
-    load_document, chunk_documents,
-    enrich_metadata, create_parent_child_chunks, create_summary_documents,
-)
 from generator import (
     generate_answer,
     generate_answer_stream,
@@ -35,15 +31,6 @@ from generator import (
     is_edit_intent,
 )
 from reviewer import review_research, analyze_papers_critically_stream
-from vector_store import (
-    get_embedding_model,
-    get_pinecone_index,
-    upsert_documents,
-    ingest_documents,
-    retrieve_unified,
-    enhanced_retrieve,
-    delete_document,
-)
 
 
 _THINK_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
@@ -52,17 +39,26 @@ INSUFFICIENT_VAULT_FALLBACK = (
     "No sufficient supporting paper was found in the Reference Vault. "
     "Upload or import a relevant paper before using this as a research-grounded answer."
 )
-REFERENCE_VAULT_SOURCE_TYPES = {"document", "reference_document"}
+REFERENCE_VAULT_SOURCE_TYPES = {"reference_document"}
 
 
 def _is_reference_vault_doc(doc) -> bool:
     metadata = getattr(doc, "metadata", {}) or {}
-    source_type = metadata.get("source_type", metadata.get("source", "document"))
+    source_type = metadata.get("source_type", metadata.get("source", ""))
     return source_type in REFERENCE_VAULT_SOURCE_TYPES
 
 
 def _filter_reference_vault_docs(docs):
     return [doc for doc in (docs or []) if _is_reference_vault_doc(doc)]
+
+
+def _retrieve_reference_vault_docs(query: str, user_id: str, k: int = 5, **kwargs):
+    try:
+        from llamaindex_pinecone_rag import retrieve_reference_vault
+
+        return retrieve_reference_vault(query, user_id, k=k, **kwargs)
+    except Exception:
+        return []
 
 
 def _render_reference_vault_sources(docs, empty_caption=INSUFFICIENT_VAULT_FALLBACK):
@@ -383,10 +379,7 @@ def main():
 
     # ── Session state defaults ─────────────────────────────────────────────────
     defaults = {
-        "processed_docs": [
-            {"name": d["filename"], "chunks": d["chunk_count"], "doc_id": d["id"]}
-            for d in database.load_all_documents(user_id)
-        ],
+        "processed_docs": [],
         "messages": [],
         "total_tokens": 0,
         "input_tokens": 0,
@@ -517,18 +510,8 @@ def main():
 
             progress = st.progress(0, text="เริ่มต้นระบบ...")
 
-            # Step 1: Initialize Pinecone client (used for inference + index)
-            progress.progress(15, text="🔗 กำลังเชื่อมต่อ Pinecone...")
-            embedding_model = get_embedding_model()
-            progress.progress(60, text="✅ เชื่อมต่อ Pinecone Client สำเร็จ")
-
-            # Step 2: Connect to Pinecone index
-            progress.progress(70, text="📝 กำลังเชื่อมต่อ Pinecone Index...")
-            try:
-                get_pinecone_index()
-                progress.progress(90, text="✅ เชื่อมต่อ Pinecone Index สำเร็จ")
-            except Exception as e:
-                progress.progress(90, text=f"⚠️ Pinecone: {str(e)[:50]}")
+            # Pinecone and embedding clients are initialized lazily by upload/RAG actions.
+            progress.progress(90, text="Preparing workspace...")
 
             # Step 3: Finalize
             progress.progress(100, text="✅ พร้อมใช้งาน!")
@@ -539,14 +522,7 @@ def main():
         # Clear loading screen and mark as initialized
         loading.empty()
         st.session_state._app_initialized = True
-        st.session_state._cached_embeddings = embedding_model
         st.rerun()
-
-    # ── App already initialized — retrieve cached embeddings ──────────────────
-    embedding_model = st.session_state.get("_cached_embeddings")
-    if embedding_model is None:
-        embedding_model = get_embedding_model()
-        st.session_state._cached_embeddings = embedding_model
 
     # Apply pending editor content BEFORE any widget is rendered
     for widget_key, pending_key in [
@@ -812,7 +788,10 @@ def main():
             if st.button("Process paper", type="primary", key="process_doc_btn", use_container_width=True):
                 _MAX_DOCS = 5
                 _MAX_FILE_BYTES = 15 * 1024 * 1024
-                _current_doc_count = len(st.session_state.processed_docs)
+                _current_doc_count = len([
+                    d for d in database.list_reference_vault_documents(user_id)
+                    if d.get("status") != "archived"
+                ])
                 _slots_remaining = _MAX_DOCS - _current_doc_count
 
                 _valid_files = []
@@ -835,78 +814,51 @@ def main():
                     st.warning(f"Only {_slots_remaining} more paper(s) can be added.")
                     _valid_files = _valid_files[:_slots_remaining]
 
-                all_child_chunks = []
-                all_parent_records = []
-                all_summary_docs = []
                 new_doc_entries = []
 
                 with st.spinner(f"Processing {len(_valid_files)} paper(s) for Reference Vault..."):
+                    from docling_ingestion import ingest_uploaded_pdf_with_docling
+                    from llamaindex_pinecone_rag import index_docling_result
+
                     for uploaded_file in _valid_files:
+                        tmp_path = None
                         try:
                             ext = os.path.splitext(uploaded_file.name)[1].lower()
                             with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
                                 tmp_file.write(uploaded_file.getvalue())
                                 tmp_path = tmp_file.name
 
-                            documents = load_document(tmp_path)
-                            documents = enrich_metadata(
-                                documents, uploaded_file.name,
-                                source_type="document",
-                            )
-
-                            child_chunks, parent_records = create_parent_child_chunks(
-                                documents, uploaded_file.name,
-                                source_type="document",
-                            )
-                            summary_docs = create_summary_documents(documents, uploaded_file.name)
-
-                            doc_id = database.save_document_metadata(
+                            docling_result = ingest_uploaded_pdf_with_docling(
+                                tmp_path,
                                 filename=uploaded_file.name,
-                                file_type=ext.lstrip('.'),
-                                chunk_count=len(child_chunks),
-                                db_path="pinecone",
                                 user_id=user_id,
                             )
-                            for chunk in child_chunks:
-                                chunk.metadata['doc_id'] = doc_id
-                            if summary_docs:
-                                for sdoc in summary_docs:
-                                    sdoc.metadata['doc_id'] = doc_id
-
-                            all_child_chunks.extend(child_chunks)
-                            all_parent_records.extend(parent_records)
-                            all_summary_docs.extend(summary_docs)
+                            index_result = index_docling_result(docling_result)
+                            doc_id = docling_result.document_id
                             new_doc_entries.append({
                                 "name": uploaded_file.name,
-                                "chunks": len(child_chunks),
                                 "doc_id": doc_id,
+                                "project_id": docling_result.project_id,
                                 "status": "active",
+                                "chunks": index_result.get("chunk_count", 0),
                             })
-                            os.unlink(tmp_path)
                         except Exception as e:
                             st.error(f"{uploaded_file.name}: {str(e)}")
+                        finally:
+                            if tmp_path and os.path.exists(tmp_path):
+                                os.unlink(tmp_path)
 
-                    if all_child_chunks:
-                        try:
-                            ingest_documents(
-                                all_child_chunks,
-                                all_parent_records,
-                                user_id,
-                                all_summary_docs,
-                                embedding_model,
-                            )
-                            existing_names = {d["name"] for d in st.session_state.processed_docs}
-                            st.session_state.processed_docs.extend(
-                                e for e in new_doc_entries if e["name"] not in existing_names
-                            )
-                            st.session_state.messages = []
-                            st.session_state.total_tokens = 0
-                            st.session_state.input_tokens = 0
-                            st.session_state.output_tokens = 0
-                            st.session_state.total_cost_thb = 0.0
-                            st.success(f"{len(new_doc_entries)}/{len(_valid_files)} paper(s) ready in Reference Vault.")
-                        except Exception as e:
-                            st.error(f"Vector index error: {str(e)}")
+                    if new_doc_entries:
+                        st.session_state.messages = []
+                        st.session_state.total_tokens = 0
+                        st.session_state.input_tokens = 0
+                        st.session_state.output_tokens = 0
+                        st.session_state.total_cost_thb = 0.0
+                        _indexed_chunks = sum(entry.get("chunks", 0) for entry in new_doc_entries)
+                        st.success(
+                            "PDF converted to Markdown and saved to Reference Vault. "
+                            f"Indexed {_indexed_chunks} Reference Vault chunk(s)."
+                        )
 
         st.divider()
         st.markdown("**OpenAlex metadata discovery**")
@@ -933,34 +885,19 @@ def main():
 
         if _vault_docs:
             st.caption(f"{len(_vault_docs)} Reference Vault record(s)")
-            for _rv in _vault_docs:
+            for _di, _rv in enumerate(_vault_docs):
                 _paper_name = _rv.get("paper_name") or _rv.get("filename") or "Untitled paper"
                 _author = _rv.get("author_display") or "Unknown author"
                 _status = _rv.get("status") or "active"
-                st.markdown(f"**{_paper_name}**")
-                st.caption(f"{_author} | status: {_status}")
-                if _status == "metadata_only" or (_rv.get("source_type") == "openalex" and not _rv.get("storage_path")):
-                    st.warning("Metadata only: no uploaded/full-text paper is available for evidence-backed RAG or citation.")
-        elif st.session_state.processed_docs:
-            st.caption(f"{len(st.session_state.processed_docs)} uploaded paper(s) in the legacy document store")
-            for _di, doc_entry in enumerate(list(st.session_state.processed_docs)):
                 col_info, col_del = st.columns([5, 1])
                 with col_info:
-                    st.markdown(f"**{doc_entry['name']}**")
-                    st.caption(f"{doc_entry['chunks']} chunks | status: active")
+                    st.markdown(f"**{_paper_name}**")
+                    st.caption(f"{_author} | status: {_status}")
+                    if _status == "metadata_only" or (_rv.get("source_type") == "openalex" and not _rv.get("storage_path")):
+                        st.warning("Metadata only: no uploaded/full-text paper is available for evidence-backed RAG or citation.")
                 with col_del:
-                    if st.button("Delete", key=f"del_doc_{_di}", help="Delete this paper"):
-                        try:
-                            delete_document(doc_entry["name"], user_id)
-                        except Exception as e:
-                            st.error(f"Vector index delete error: {e}")
-                        database.delete_parent_chunks_by_source(doc_entry["name"])
-                        if doc_entry.get("doc_id"):
-                            database.delete_document_by_id(doc_entry["doc_id"], user_id)
-                        st.session_state.processed_docs = [
-                            d for d in st.session_state.processed_docs
-                            if d["name"] != doc_entry["name"]
-                        ]
+                    if _status != "archived" and st.button("Archive", key=f"archive_rv_doc_{_di}", help="Archive this paper"):
+                        database.delete_reference_vault_document(_rv["document_id"], user_id)
                         st.rerun()
         else:
             st.info("No papers in the Reference Vault yet. Upload a PDF paper or import OpenAlex metadata when available.")
@@ -1048,11 +985,9 @@ def main():
                 else:
                     with st.spinner("🧭 กำลังสร้างแนวทางการวิจัย..."):
                         try:
-                            _guide_docs = enhanced_retrieve(
+                            _guide_docs = _retrieve_reference_vault_docs(
                                 guide_topic.strip(), user_id, k=5,
-                                source_type="document",
                             )
-                            _guide_docs = _filter_reference_vault_docs(_guide_docs)
                             st.session_state.research_guide_retrieved_docs = _guide_docs
                             _guide_text, _guide_input_tokens, _guide_output_tokens = (
                                 generate_research_guide(
@@ -1121,20 +1056,29 @@ def main():
                 preset_choice = None
 
             if _gen_source == "เอกสารที่เลือก":
-                _kb_docs = database.load_all_documents(user_id)
-                _doc_names = [d["filename"] for d in _kb_docs]
-                if _doc_names:
+                _vault_docs_for_section = [
+                    d for d in database.list_reference_vault_documents(user_id, status="active")
+                    if d.get("docling_status") == "succeeded"
+                ]
+                _doc_options = {
+                    f"{d.get('paper_name') or d.get('filename') or 'Untitled paper'} ({d['document_id'][:8]})": d["document_id"]
+                    for d in _vault_docs_for_section
+                }
+                if _doc_options:
                     _selected_docs = st.multiselect(
                         "เลือกเอกสารจาก Reference Vault",
-                        options=_doc_names,
+                        options=list(_doc_options.keys()),
                         key="sec_selected_docs",
                         placeholder="เลือกอย่างน้อย 1 เอกสาร...",
                     )
+                    _selected_doc_ids = [_doc_options[label] for label in _selected_docs]
                 else:
                     st.caption("ยังไม่มีเอกสารใน Reference Vault")
                     _selected_docs = []
+                    _selected_doc_ids = []
             else:
                 _selected_docs = []
+                _selected_doc_ids = []
 
             sec_generate = st.button(
                 "🚀 สร้างเนื้อหา",
@@ -1178,17 +1122,12 @@ def main():
                     if not _selected_docs:
                         st.warning("⚠️ กรุณาเลือกเอกสารอย่างน้อย 1 รายการ")
                     else:
-                        retrieved = []
-                        for doc_name in _selected_docs:
-                            try:
-                                docs = retrieve_unified(
-                                    f"{sec_topic} {final_instruction}",
-                                    user_id, k=3, doc_name=doc_name,
-                                    embedding_model=embedding_model,
-                                )
-                                retrieved.extend(docs)
-                            except Exception as e:
-                                st.warning(f"⚠️ ดึงเอกสาร '{doc_name}' ไม่ได้: {e}")
+                        retrieved = _retrieve_reference_vault_docs(
+                            f"{sec_topic} {final_instruction}",
+                            user_id,
+                            k=9,
+                            document_ids=_selected_doc_ids,
+                        )
                         # Deduplicate by content[:100] fingerprint, cap at 9 total
                         seen = set()
                         deduped = []
@@ -1334,11 +1273,8 @@ def main():
                             )
                             _review_retrieved = []
                             try:
-                                _review_retrieved = enhanced_retrieve(
+                                _review_retrieved = _retrieve_reference_vault_docs(
                                     _review_rag_query, user_id, k=4,
-                                    embedding_model=embedding_model,
-                                    use_query_router=False,
-                                    use_reranker=True,
                                 )
                             except Exception:
                                 _review_retrieved = []
@@ -1379,7 +1315,15 @@ def main():
 
         # ── Compare / Critically Analyze Papers Section ────────────────────────
         with st.expander("🔬 วิเคราะห์-เปรียบเทียบงานวิจัย ในแหล่งความรู้", expanded=False):
-            _available_papers = [d["name"] for d in st.session_state.processed_docs]
+            _compare_vault_docs = [
+                d for d in database.list_reference_vault_documents(user_id, status="active")
+                if d.get("docling_status") == "succeeded"
+            ]
+            _compare_doc_options = {
+                f"{d.get('paper_name') or d.get('filename') or 'Untitled paper'} ({d['document_id'][:8]})": d["document_id"]
+                for d in _compare_vault_docs
+            }
+            _available_papers = list(_compare_doc_options.keys())
             if not _available_papers:
                 st.info("ℹ️ ยังไม่มีเอกสารในแหล่งความรู้ กรุณาอัปโหลดเอกสารก่อน")
             else:
@@ -1418,18 +1362,15 @@ def main():
                             _all_retrieved = []
                             _paper_sections = []
                             for _pname in _selected_papers:
+                                _doc_id = _compare_doc_options.get(_pname)
                                 _seen_fps: set = set()
                                 _merged_docs = []
                                 for _q in [_QUERY_OBJECTIVES, _QUERY_METHODS]:
-                                    for _d in retrieve_unified(
+                                    for _d in _retrieve_reference_vault_docs(
                                         _q,
                                         user_id,
                                         k=5,
-                                        source_type="document",
-                                        doc_name=_pname,
-                                        embedding_model=embedding_model,
-                                        expand_parents=True,
-                                        hybrid=True,
+                                        document_ids=[_doc_id] if _doc_id else None,
                                     ):
                                         _fp = _d.page_content[:80]
                                         if _fp not in _seen_fps:
@@ -2153,11 +2094,8 @@ def main():
                         _sel_rag_query = f"{instruction} {selected[:150]}"
                         _sel_retrieved = []
                         try:
-                            _sel_retrieved = enhanced_retrieve(
+                            _sel_retrieved = _retrieve_reference_vault_docs(
                                 _sel_rag_query, user_id, k=3,
-                                embedding_model=embedding_model,
-                                use_query_router=True,
-                                use_reranker=False,
                             )
                         except Exception:
                             _sel_retrieved = []
@@ -2226,11 +2164,8 @@ def main():
                         _ins_rag_query = f"{instruction} {_ins_surrounding}"
                         _ins_retrieved = []
                         try:
-                            _ins_retrieved = enhanced_retrieve(
+                            _ins_retrieved = _retrieve_reference_vault_docs(
                                 _ins_rag_query, user_id, k=3,
-                                embedding_model=embedding_model,
-                                use_query_router=True,
-                                use_reranker=False,
                             )
                         except Exception:
                             _ins_retrieved = []
@@ -2309,16 +2244,10 @@ def main():
                     if _is_small_talk:
                         retrieved_docs = []
                     else:
-                        # Enhanced retrieval: query classification + reranking + fallback
                         retrieval_k = 5 if is_research else 3
-                        retrieved_docs = enhanced_retrieve(
+                        retrieved_docs = _retrieve_reference_vault_docs(
                             actual_query, user_id, k=retrieval_k,
-                            expand_parents=True,
-                            embedding_model=embedding_model,
-                            use_query_router=True,
-                            use_reranker=True,
                         )
-                        retrieved_docs = _filter_reference_vault_docs(retrieved_docs)
 
                     # ── Response generation ───────────────────────────────────
                     if is_research:

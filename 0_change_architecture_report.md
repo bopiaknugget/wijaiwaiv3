@@ -1,3 +1,7 @@
+> Superseded note (2026-05-03): This report was written for an older PostgreSQL migration direction.
+> The active architecture decision is now SQLite-first: keep SQLite, do not migrate to PostgreSQL,
+> and use `reports/db_fix.md` plus AGENTS.md for current database work.
+
 # Wijaiwai Architecture Change Report
 
 Review scope: current codebase compared against the v2 architecture only. No product code was refactored.

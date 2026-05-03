@@ -9,6 +9,7 @@ Migration: ALTER TABLE adds user_id columns if they don't exist on startup.
 """
 
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from pathlib import Path
 
 
 DB_PATH = Path(__file__).parent / "Database" / "research_notes.db"
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _utc_now() -> str:
@@ -167,11 +169,16 @@ def initialize_database():
                 doi                      TEXT,
                 openalex_id              TEXT,
                 publication_year         INTEGER,
+                source_origin            TEXT,
+                source_name              TEXT,
+                landing_page_url         TEXT,
+                pdf_url                  TEXT,
                 filename                 TEXT,
                 file_type                TEXT,
                 storage_path             TEXT,
                 docling_markdown_path    TEXT,
                 docling_status           TEXT,
+                summary                  TEXT,
                 source_type              TEXT NOT NULL DEFAULT 'reference_document',
                 status                   TEXT NOT NULL DEFAULT 'active',
                 metadata_json            TEXT,
@@ -198,6 +205,7 @@ def initialize_database():
                 pinecone_vector_id TEXT,
                 embedding_model    TEXT,
                 source_type        TEXT DEFAULT 'reference_document',
+                node_metadata_json TEXT,
                 metadata_json      TEXT,
                 created_at         TEXT
             )
@@ -297,11 +305,21 @@ def initialize_database():
         _add_column_if_missing(cursor, "documents",      "user_id", "TEXT")
         _add_column_if_missing(cursor, "research_notes", "user_id", "TEXT")
         _add_column_if_missing(cursor, "web_pages",      "user_id", "TEXT")
+        _add_column_if_missing(cursor, "reference_vault_documents", "source_origin", "TEXT")
+        _add_column_if_missing(cursor, "reference_vault_documents", "source_name", "TEXT")
+        _add_column_if_missing(cursor, "reference_vault_documents", "landing_page_url", "TEXT")
+        _add_column_if_missing(cursor, "reference_vault_documents", "pdf_url", "TEXT")
+        _add_column_if_missing(cursor, "reference_vault_documents", "summary", "TEXT")
+        _add_column_if_missing(cursor, "reference_vault_chunks", "node_metadata_json", "TEXT")
         conn.commit()
 
 
 def _add_column_if_missing(cursor, table: str, column: str, col_type: str):
     """Add a column to a table only if it doesn't already exist."""
+    if not _SQL_IDENTIFIER_RE.fullmatch(table):
+        raise ValueError(f"Invalid table identifier: {table}")
+    if not _SQL_IDENTIFIER_RE.fullmatch(column):
+        raise ValueError(f"Invalid column identifier: {column}")
     cursor.execute(f"PRAGMA table_info({table})")
     existing = {row[1] for row in cursor.fetchall()}
     if column not in existing:
@@ -354,11 +372,16 @@ def save_reference_vault_document(
     doi: str = None,
     openalex_id: str = None,
     publication_year: int = None,
+    source_origin: str = None,
+    source_name: str = None,
+    landing_page_url: str = None,
+    pdf_url: str = None,
     filename: str = None,
     file_type: str = None,
     storage_path: str = None,
     docling_markdown_path: str = None,
     docling_status: str = None,
+    summary: str = None,
     source_type: str = 'reference_document',
     status: str = 'active',
     metadata_json=None,
@@ -384,18 +407,20 @@ def save_reference_vault_document(
             '''
             INSERT OR REPLACE INTO reference_vault_documents (
                 document_id, user_id, project_id, paper_name, author_display,
-                authors_json, doi, openalex_id, publication_year, filename,
-                file_type, storage_path, docling_markdown_path, docling_status,
+                authors_json, doi, openalex_id, publication_year, source_origin,
+                source_name, landing_page_url, pdf_url, filename, file_type,
+                storage_path, docling_markdown_path, docling_status, summary,
                 source_type, status, metadata_json, extraction_metadata_json,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 document_id, user_id, project_id, paper_name, author_display,
                 _json_text(authors_json), doi, openalex_id, publication_year,
-                filename, file_type, storage_path, docling_markdown_path,
-                docling_status, source_type, status, _json_text(metadata_json),
+                source_origin, source_name, landing_page_url, pdf_url, filename,
+                file_type, storage_path, docling_markdown_path, docling_status,
+                summary, source_type, status, _json_text(metadata_json),
                 _json_text(extraction_metadata_json), created_at, now,
             )
         )
@@ -450,23 +475,72 @@ def update_reference_vault_document_status(
     document_id: str,
     status: str,
     metadata_json=None,
+    user_id: str = None,
+    project_id: str = None,
 ) -> bool:
     """Update Reference Vault document status and optional metadata."""
     now = _utc_now()
+    scope_sql = ''
+    scope_params = []
+    if user_id is not None:
+        scope_sql += ' AND user_id = ?'
+        scope_params.append(user_id)
+    if project_id is not None:
+        scope_sql += ' AND project_id = ?'
+        scope_params.append(project_id)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if metadata_json is None:
             cursor.execute(
                 'UPDATE reference_vault_documents SET status = ?, updated_at = ? '
-                'WHERE document_id = ?',
-                (status, now, document_id)
+                f'WHERE document_id = ?{scope_sql}',
+                [status, now, document_id] + scope_params,
             )
         else:
             cursor.execute(
                 'UPDATE reference_vault_documents '
-                'SET status = ?, metadata_json = ?, updated_at = ? WHERE document_id = ?',
-                (status, _json_text(metadata_json), now, document_id)
+                f'SET status = ?, metadata_json = ?, updated_at = ? WHERE document_id = ?{scope_sql}',
+                [status, _json_text(metadata_json), now, document_id] + scope_params,
             )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_reference_vault_document_metadata(
+    document_id: str,
+    metadata_json=None,
+    extraction_metadata_json=None,
+    user_id: str = None,
+    project_id: str = None,
+) -> bool:
+    """Update Reference Vault document metadata fields without changing status."""
+    assignments = ['updated_at = ?']
+    params = [_utc_now()]
+    if metadata_json is not None:
+        assignments.append('metadata_json = ?')
+        params.append(_json_text(metadata_json))
+    if extraction_metadata_json is not None:
+        assignments.append('extraction_metadata_json = ?')
+        params.append(_json_text(extraction_metadata_json))
+    if len(assignments) == 1:
+        return False
+
+    params.append(document_id)
+    if user_id is not None:
+        assignments_scope = ' AND user_id = ?'
+        params.append(user_id)
+    else:
+        assignments_scope = ''
+    if project_id is not None:
+        assignments_scope += ' AND project_id = ?'
+        params.append(project_id)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f'UPDATE reference_vault_documents SET {", ".join(assignments)} '
+            f'WHERE document_id = ?{assignments_scope}',
+            params,
+        )
         conn.commit()
         return cursor.rowcount > 0
 
@@ -506,6 +580,7 @@ def save_reference_vault_chunk(
     pinecone_vector_id: str = None,
     embedding_model: str = None,
     source_type: str = 'reference_document',
+    node_metadata_json=None,
     metadata_json=None,
 ) -> str:
     """Insert or replace a Reference Vault chunk and return its string ID."""
@@ -528,15 +603,15 @@ def save_reference_vault_chunk(
                 chunk_id, document_id, user_id, project_id, parent_chunk_id,
                 chunk_index, markdown_content, content, content_hash,
                 page_number, section_title, pinecone_vector_id,
-                embedding_model, source_type, metadata_json, created_at
+                embedding_model, source_type, node_metadata_json, metadata_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 chunk_id, document_id, user_id, project_id, parent_chunk_id,
                 chunk_index, markdown_content, content, content_hash,
                 page_number, section_title, pinecone_vector_id, embedding_model,
-                source_type, _json_text(metadata_json), now,
+                source_type, _json_text(node_metadata_json), _json_text(metadata_json), now,
             )
         )
         conn.commit()
@@ -573,6 +648,7 @@ def save_reference_vault_chunks_batch(records: list):
             record.get('pinecone_vector_id'),
             record.get('embedding_model'),
             record.get('source_type', 'reference_document'),
+            _json_text(record.get('node_metadata_json')),
             _json_text(record.get('metadata_json')),
             record.get('created_at') or now,
         ))
@@ -587,35 +663,77 @@ def save_reference_vault_chunks_batch(records: list):
                 chunk_id, document_id, user_id, project_id, parent_chunk_id,
                 chunk_index, markdown_content, content, content_hash,
                 page_number, section_title, pinecone_vector_id,
-                embedding_model, source_type, metadata_json, created_at
+                embedding_model, source_type, node_metadata_json, metadata_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             prepared
         )
         conn.commit()
 
 
-def get_reference_vault_chunk(chunk_id: str) -> dict | None:
+def get_reference_vault_chunk(
+    chunk_id: str,
+    user_id: str = None,
+    project_id: str = None,
+) -> dict | None:
     """Retrieve a Reference Vault chunk by ID."""
+    query = 'SELECT * FROM reference_vault_chunks WHERE chunk_id = ?'
+    params = [chunk_id]
+    if user_id is not None:
+        query += ' AND user_id = ?'
+        params.append(user_id)
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'SELECT * FROM reference_vault_chunks WHERE chunk_id = ?',
-            (chunk_id,)
-        )
+        cursor.execute(query, params)
         return _row_to_dict(cursor, cursor.fetchone())
 
 
-def get_reference_vault_chunks_by_document(document_id: str) -> list:
+def get_reference_vault_chunks_by_document(
+    document_id: str,
+    user_id: str = None,
+    project_id: str = None,
+) -> list:
     """Retrieve Reference Vault chunks for a document ordered by chunk index."""
+    query = 'SELECT * FROM reference_vault_chunks WHERE document_id = ?'
+    params = [document_id]
+    if user_id is not None:
+        query += ' AND user_id = ?'
+        params.append(user_id)
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
+    query += ' ORDER BY chunk_index ASC'
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'SELECT * FROM reference_vault_chunks WHERE document_id = ? '
-            'ORDER BY chunk_index ASC',
-            (document_id,)
-        )
+        cursor.execute(query, params)
+        return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
+
+
+def get_reference_vault_chunks_by_ids(
+    chunk_ids: list,
+    user_id: str,
+    project_id: str = None,
+) -> list:
+    """Retrieve Reference Vault chunks by chunk IDs with user/project scope."""
+    if not chunk_ids:
+        return []
+    placeholders = ','.join('?' for _ in chunk_ids)
+    query = (
+        f'SELECT * FROM reference_vault_chunks WHERE chunk_id IN ({placeholders}) '
+        'AND user_id = ?'
+    )
+    params = list(chunk_ids) + [user_id]
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
         return [_row_to_dict(cursor, row) for row in cursor.fetchall()]
 
 
@@ -646,19 +764,48 @@ def get_reference_vault_chunks_by_vector_ids(
 def update_reference_vault_chunk_vector_id(
     chunk_id: str,
     pinecone_vector_id: str,
+    user_id: str = None,
+    project_id: str = None,
 ) -> bool:
     """Persist the Pinecone vector ID for a Reference Vault chunk."""
+    query = 'UPDATE reference_vault_chunks SET pinecone_vector_id = ? WHERE chunk_id = ?'
+    params = [pinecone_vector_id, chunk_id]
+    if user_id is not None:
+        query += ' AND user_id = ?'
+        params.append(user_id)
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            'UPDATE reference_vault_chunks SET pinecone_vector_id = ? WHERE chunk_id = ?',
-            (pinecone_vector_id, chunk_id)
-        )
+        cursor.execute(query, params)
         conn.commit()
         return cursor.rowcount > 0
 
 
 # ── v3 OpenAlex Cache and Citation Logging ──────────────────────────────────
+
+def delete_reference_vault_chunks_by_document(
+    document_id: str,
+    user_id: str = None,
+    project_id: str = None,
+) -> int:
+    """Delete Reference Vault chunks for a document and return affected row count."""
+    query = 'DELETE FROM reference_vault_chunks WHERE document_id = ?'
+    params = [document_id]
+    if user_id is not None:
+        query += ' AND user_id = ?'
+        params.append(user_id)
+    if project_id is not None:
+        query += ' AND project_id = ?'
+        params.append(project_id)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        return cursor.rowcount
+
 
 def cache_openalex_search(query: str, response_json, user_id: str = None) -> str:
     """Cache an OpenAlex search response as SQLite TEXT."""

@@ -29,6 +29,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 import database
+from tls_config import sanitize_tls_ca_bundle_env
 
 # Conditional Streamlit import — allows CLI usage (main.py) without Streamlit
 try:
@@ -40,6 +41,7 @@ except ImportError:
 # Load environment variables
 _ENV_PATH = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
+sanitize_tls_ca_bundle_env()
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "wijaiwai")

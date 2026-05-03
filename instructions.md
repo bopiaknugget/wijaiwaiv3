@@ -1,3 +1,7 @@
+Superseded note (2026-05-03): The current architecture decision is to keep SQLite.
+Do not replace SQLite with PostgreSQL. Use AGENTS.md and `_context_packs/data_model_sqlite.md`
+for current database work. The PostgreSQL references below are historical.
+
 Review the current Wijaiwai codebase against the new architecture only. Do not edit files yet.
 
 New requirements:

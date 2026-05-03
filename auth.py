@@ -12,10 +12,12 @@ import requests
 from dotenv import load_dotenv
 
 import database
+from tls_config import sanitize_tls_ca_bundle_env
 
 # Load environment variables
 _ENV_PATH = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
+sanitize_tls_ca_bundle_env()
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
@@ -24,6 +26,7 @@ GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8501/oa
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+GOOGLE_OAUTH_CA_BUNDLE = requests.certs.where()
 
 # Scopes needed: basic profile info and email
 SCOPES = "openid email profile"
@@ -68,7 +71,12 @@ def exchange_code_for_token(code: str) -> dict:
         "redirect_uri": GOOGLE_REDIRECT_URI,
         "grant_type": "authorization_code",
     }
-    response = requests.post(GOOGLE_TOKEN_URL, data=payload, timeout=30)
+    response = requests.post(
+        GOOGLE_TOKEN_URL,
+        data=payload,
+        timeout=30,
+        verify=GOOGLE_OAUTH_CA_BUNDLE,
+    )
 
     if response.status_code != 200:
         raise ValueError(
@@ -90,7 +98,12 @@ def get_user_info(access_token: str) -> dict:
         dict: User profile with keys: id, email, name, picture
     """
     headers = {"Authorization": f"Bearer {access_token}"}
-    response = requests.get(GOOGLE_USERINFO_URL, headers=headers, timeout=30)
+    response = requests.get(
+        GOOGLE_USERINFO_URL,
+        headers=headers,
+        timeout=30,
+        verify=GOOGLE_OAUTH_CA_BUNDLE,
+    )
 
     if response.status_code != 200:
         raise ValueError(
